@@ -1,13 +1,22 @@
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import { sql } from "drizzle-orm";
+import { fastifyConnectPlugin } from "@connectrpc/connect-fastify";
 import { db } from "@modelhub/db";
 import { redis } from "./redis.js";
 import { auth } from "./auth/auth.js";
 import { requireSession } from "./auth/session.js";
 import { env } from "./env.js";
+import { routes } from "./rpc/index.js";
 
 export async function buildApp(): Promise<FastifyInstance> {
-  const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
+  const app = Fastify({
+    logger: { level: process.env.LOG_LEVEL ?? "info" },
+    // Inventory reports (Task 10) travel over this same server; the
+    // Fastify default (1MiB) is too small for those payloads.
+    bodyLimit: 4 * 1024 * 1024,
+  });
+
+  await app.register(fastifyConnectPlugin, { routes });
 
   app.setNotFoundHandler((req, reply) => {
     reply.code(404).send({ error: "not_found", path: req.url });
