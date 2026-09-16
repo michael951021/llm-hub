@@ -5,10 +5,13 @@ import { createConnectTransport, Http2SessionManager } from "@connectrpc/connect
 import { eq } from "drizzle-orm";
 import { ownerDb, organization, nodes, devices } from "@modelhub/db";
 import { NodeService, DeviceKind, MemoryPressure } from "@modelhub/proto";
-import { buildApp } from "../app.js";
+// NodeService.Connect lives on the agent-facing app: it's a bidi stream,
+// which needs HTTP/2 framing that the browser-facing buildApp() no longer
+// offers. See agent-app.ts.
+import { buildAgentApp } from "../agent-app.js";
 import { sweepOfflineNodes } from "../jobs/offline-sweeper.js";
 
-let app: Awaited<ReturnType<typeof buildApp>>;
+let app: Awaited<ReturnType<typeof buildAgentApp>>;
 let baseUrl: string;
 let nodeId: string;
 let privateKey: KeyObject;
@@ -40,7 +43,7 @@ beforeAll(async () => {
   }).returning({ id: nodes.id });
   nodeId = row!.id;
 
-  app = await buildApp();
+  app = await buildAgentApp();
   await app.listen({ port: 0, host: "127.0.0.1" });
   const address = app.server.address();
   baseUrl = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
@@ -142,6 +145,33 @@ describe("NodeService.Connect", () => {
 
     const rows = await ownerDb.select().from(devices).where(eq(devices.nodeId, nodeId));
     expect(rows.map((r) => r.localId)).toEqual(["cuda:0"]);
+  });
+
+  it("refreshes lastSeenAt from an empty sample batch alone", async () => {
+    // recordSamples deliberately does not early-return on an empty
+    // `samples` array (a deviation from the task brief's sketch): an
+    // agent that is connected and sends a SampleBatch with no devices in
+    // it is still alive, so that alone should count as a heartbeat. Prove
+    // it in isolation — no hello, no inventory in this stream — so this
+    // doesn't pass merely because hello's markNodeOnline() also touches
+    // lastSeenAt.
+    await ownerDb.update(nodes)
+      .set({ status: "offline", lastSeenAt: new Date(Date.now() - 60_000) })
+      .where(eq(nodes.id, nodeId));
+
+    async function* emptyBatchOnly() {
+      yield { payload: { case: "samples" as const, value: { samples: [] } } };
+    }
+
+    const stream = client().connect(emptyBatchOnly(), {
+      headers: { authorization: authHeader() },
+    });
+    for await (const _ of stream) break;
+    await new Promise((r) => setTimeout(r, 300));
+
+    const [node] = await ownerDb.select().from(nodes).where(eq(nodes.id, nodeId));
+    expect(node!.status).toBe("online");
+    expect(node!.lastSeenAt!.getTime()).toBeGreaterThan(Date.now() - 5_000);
   });
 
   it("marks a silent node degraded, then offline", async () => {

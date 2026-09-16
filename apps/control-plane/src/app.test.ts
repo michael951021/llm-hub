@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { FastifyInstance } from "fastify";
 import { appSql, ownerSql } from "@modelhub/db";
 import { buildApp } from "./app.js";
 import { redis } from "./redis.js";
 
-let app: Awaited<ReturnType<typeof buildApp>>;
+let app: FastifyInstance;
 
 beforeAll(async () => {
   app = await buildApp();

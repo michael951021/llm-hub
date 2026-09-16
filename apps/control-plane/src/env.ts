@@ -2,6 +2,10 @@ import { z } from "zod";
 
 const Schema = z.object({
   PORT: z.coerce.number().default(3000),
+  // Browsers can't speak the cleartext HTTP/2 the agent stream needs, and
+  // agents don't need a browser session — so the agent-facing Connect
+  // services (NodeService) listen on their own port, separate from PORT.
+  AGENT_PORT: z.coerce.number().default(3001),
   DATABASE_URL: z.string().min(1),
   DATABASE_OWNER_URL: z.string().optional(),
   REDIS_URL: z.string().min(1),

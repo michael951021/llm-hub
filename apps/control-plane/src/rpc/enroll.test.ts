@@ -2,12 +2,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID, generateKeyPairSync } from "node:crypto";
 import { appSql, ownerSql, ownerDb, organization, nodes } from "@modelhub/db";
 import { eq } from "drizzle-orm";
-import { buildApp } from "../app.js";
+// NodeService.Enroll lives on the agent-facing app (buildAgentApp), not
+// the browser-facing one: it's the same generated service, and the same
+// caller (an agent), as NodeService.Connect. See agent-app.ts.
+import { buildAgentApp } from "../agent-app.js";
 import { mintPairingCode } from "../domain/pairing.js";
 import { enrollNode, EnrollmentError } from "../domain/nodes.js";
 import { redis } from "../redis.js";
 
-let app: Awaited<ReturnType<typeof buildApp>>;
+let app: Awaited<ReturnType<typeof buildAgentApp>>;
 const orgId = `org_${randomUUID().slice(0, 8)}`;
 
 function newPublicKey(): Uint8Array {
@@ -20,7 +23,7 @@ beforeAll(async () => {
   // organization.createdAt has no DB-side default (see rls.test.ts /
   // pairing.test.ts) so a direct insert must supply it.
   await ownerDb.insert(organization).values({ id: orgId, name: "Fleet", slug: orgId, createdAt: new Date() });
-  app = await buildApp();
+  app = await buildAgentApp();
 });
 afterAll(async () => {
   await app.close();
