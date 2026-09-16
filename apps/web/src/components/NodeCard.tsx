@@ -33,8 +33,8 @@ export function NodeCard({ node }: { node: NodeViewLike }) {
   return (
     <section className="rounded-lg border bg-white p-4 shadow-sm">
       <header className="mb-3 flex items-start justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">{node.name}</h2>
+        <div className="min-w-0">
+          <h2 className="truncate text-lg font-semibold">{node.name}</h2>
           <p className="text-xs text-slate-500">
             {node.host
               ? `${node.host.platform}/${node.host.arch} · ${node.host.cpuCores} cores · agent ${node.host.agentVersion || "—"}`

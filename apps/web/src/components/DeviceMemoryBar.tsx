@@ -22,7 +22,10 @@ export interface DeviceViewLike {
 // on the server — this file never adds, subtracts, or clamps any of them.
 function percent(part: bigint, whole: bigint): string {
   if (whole === 0n) return "0%";
-  return `${(Number(part) / Number(whole)) * 100}%`;
+  // Round to two decimal places — a raw float (33.33333333333333%) is noise
+  // in the DOM and buys nothing visually at 3px-wide segments.
+  const pct = Math.round((Number(part) / Number(whole)) * 100 * 100) / 100;
+  return `${pct}%`;
 }
 
 // The four segments are deliberately distinct. "Memory Model Hub is using",
@@ -30,26 +33,28 @@ function percent(part: bigint, whole: bigint): string {
 // are four different facts, and a user who sees them separated understands
 // their machine in a way a single bar never conveys.
 //
-// Colors: the dataviz skill's validator (scripts/validate_palette.js) was run
-// against this exact segment order. The brief's original picks (sky/amber/
-// slate-300/emerald) failed on two axes: slate-300 for "headroom" fell below
-// both the lightness band and the chroma floor (reads as flat gray, not a
-// color the eye can place in the set), and sky/amber/emerald as an ad hoc
-// trio were never checked for CVD adjacency at all. The four hues below are
-// the validated categorical palette's first four slots, used in their
-// validated order (reordering to put a "greener" hue on "available" was
-// tried and fails the normal-vision floor — see task-17-report.md) — blue,
-// orange, aqua, yellow — which passes lightness band, chroma floor, CVD
-// adjacency (>=8 target), and the normal-vision floor (>=15) in both light
-// and dark renderings. Two of the four (aqua/yellow) sit under 3:1 contrast
-// against a white surface, which the skill flags as needing visible labels
-// rather than color-only identification — hence the labeled legend below the
-// bar, not just the hover title.
+// Colors: run through the dataviz skill's validator (scripts/validate_palette.js).
+// v1 of this bar assigned the validated palette's first four slots in order
+// (blue/orange/aqua/yellow -> managed/foreign/headroom/available), which
+// cleared every check but put green on "headroom" (unusable memory) and
+// yellow on "available" (the one number this screen exists to answer) —
+// review correctly called that an inverted at-a-glance read on a screen a
+// user mostly glances at rather than studies. Fixed by dropping to three
+// saturated hues for the three segments with real identity (managed,
+// foreign, available) plus a muted neutral for headroom, which is
+// semantically the least interesting of the four ("set aside", not
+// competing for attention) — and, as review predicted, removing headroom's
+// hue from the categorical set gives the remaining three much more
+// separation than the four-hue version had. "Available" is now the aqua/
+// green slot. See task-17-report.md for the full validator output.
 const SEGMENTS = [
   { key: "managed", label: "Model Hub", className: "bg-[#2a78d6]" },
   { key: "foreign", label: "Other processes", className: "bg-[#eb6834]" },
-  { key: "headroom", label: "Reserved headroom", className: "bg-[#1baf7a]" },
-  { key: "available", label: "Available", className: "bg-[#eda100]" },
+  // Muted neutral, not a categorical identity hue — deliberately
+  // non-competing. Same "Baseline / axis" role the palette reference uses
+  // for recessive chrome (gridlines, axes), not a series color.
+  { key: "headroom", label: "Reserved headroom", className: "bg-[#c3c2b7]" },
+  { key: "available", label: "Available", className: "bg-[#1baf7a]" },
 ] as const;
 
 export function DeviceMemoryBar({ device }: { device: DeviceViewLike }) {
