@@ -64,7 +64,16 @@ func (k *keyringIdentity) LoadOrCreate() (ed25519.PrivateKey, error) {
 		return decodeKey(stored)
 	}
 	if !errors.Is(err, keyring.ErrNotFound) {
-		return k.fallback.LoadOrCreate()
+		// The keychain exists but couldn't be used (e.g. it's locked) —
+		// distinct from ErrNotFound, where falling back silently is fine.
+		// If the fallback also fails, surface both causes: a bare file
+		// error here would hide the keychain problem, which is usually
+		// the one the user actually needs to act on.
+		priv, fbErr := k.fallback.LoadOrCreate()
+		if fbErr != nil {
+			return nil, fmt.Errorf("keychain unavailable (%w), and the fallback file identity also failed: %w", err, fbErr)
+		}
+		return priv, nil
 	}
 
 	_, priv, genErr := ed25519.GenerateKey(rand.Reader)

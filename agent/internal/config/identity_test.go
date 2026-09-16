@@ -3,8 +3,13 @@ package config
 import (
 	"bytes"
 	"crypto/ed25519"
+	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/zalando/go-keyring"
 )
 
 func TestFileIdentityGeneratesAndPersists(t *testing.T) {
@@ -49,5 +54,32 @@ func TestFileIdentityRejectsCorruptKeyMaterial(t *testing.T) {
 	}
 	if _, err := NewFileIdentity(dir).LoadOrCreate(); err == nil {
 		t.Fatal("expected an error for corrupt key material, got nil")
+	}
+}
+
+// TestKeyringIdentityWrapsBothErrorsOnDoubleFailure guards against silently
+// discarding the keychain error when both the keychain and the fallback
+// file fail: a user whose keychain is locked needs to see that, not just a
+// confusing file-path error.
+func TestKeyringIdentityWrapsBothErrorsOnDoubleFailure(t *testing.T) {
+	keyring.MockInitWithError(errors.New("keychain is locked"))
+	t.Cleanup(keyring.MockInit)
+
+	// Make the fallback file path un-creatable: a regular file in the way
+	// of a directory component makes MkdirAll fail. (Named "obstacle", not
+	// anything containing "locked" — that would spoil the assertion below.)
+	base := t.TempDir()
+	obstacle := filepath.Join(base, "obstacle")
+	if err := os.WriteFile(obstacle, []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	dir := filepath.Join(obstacle, "modelhub")
+
+	_, err := NewIdentity(dir).LoadOrCreate()
+	if err == nil {
+		t.Fatal("expected an error when both the keyring and the fallback file fail")
+	}
+	if !strings.Contains(err.Error(), "locked") {
+		t.Errorf("error does not mention the keychain failure: %v", err)
 	}
 }
