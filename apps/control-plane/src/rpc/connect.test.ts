@@ -103,10 +103,35 @@ async function* agentMessages() {
 }
 
 describe("NodeService.Connect", () => {
-  it("rejects a stream with no node authorization", async () => {
+  it("rejects a stream with no node authorization, and writes nothing", async () => {
+    // Captured before the attempt, not assumed: the assertion below is
+    // about *change* (did authenticateNode's rejection actually prevent
+    // any write?), not just "zero rows happens to be true right now".
+    const devicesBefore = await ownerDb.select().from(devices).where(eq(devices.nodeId, nodeId));
+    // This node is freshly inserted in beforeAll and no prior test in this
+    // file has written a device for it yet, so "zero rows" here is a
+    // meaningful precondition, not a coincidence of this being the first
+    // test to run — asserted explicitly so a reordering would fail loudly
+    // instead of silently making the post-attempt check ambiguous.
+    expect(devicesBefore).toHaveLength(0);
+    const [nodeBefore] = await ownerDb.select().from(nodes).where(eq(nodes.id, nodeId));
+
     await expect(async () => {
       for await (const _ of client().connect(agentMessages())) break;
     }).rejects.toThrow();
+
+    // The full Hello -> InventoryReport -> SampleBatch sequence was sent
+    // on the wire above; if authenticateNode() were not genuinely the
+    // first thing the handler does, some prefix of it could have been
+    // processed before the rejection. Prove it wasn't: no device row
+    // exists, and the node's liveness columns are byte-for-byte what they
+    // were before the attempt.
+    const devicesAfter = await ownerDb.select().from(devices).where(eq(devices.nodeId, nodeId));
+    expect(devicesAfter).toHaveLength(0);
+
+    const [nodeAfter] = await ownerDb.select().from(nodes).where(eq(nodes.id, nodeId));
+    expect(nodeAfter!.status).toBe(nodeBefore!.status);
+    expect(nodeAfter!.lastSeenAt).toEqual(nodeBefore!.lastSeenAt);
   });
 
   it("acknowledges hello, stores inventory, and records samples", async () => {
