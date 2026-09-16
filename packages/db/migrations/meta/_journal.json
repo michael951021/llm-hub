@@ -15,6 +15,13 @@
       "when": 1789541842031,
       "tag": "0001_roles_and_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789543740128,
+      "tag": "0002_green_martin_li",
+      "breakpoints": true
     }
   ]
 }

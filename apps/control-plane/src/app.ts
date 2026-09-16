@@ -2,6 +2,9 @@ import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import { sql } from "drizzle-orm";
 import { db } from "@modelhub/db";
 import { redis } from "./redis.js";
+import { auth } from "./auth/auth.js";
+import { requireSession } from "./auth/session.js";
+import { env } from "./env.js";
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
@@ -27,6 +30,44 @@ export async function buildApp(): Promise<FastifyInstance> {
     const status = database === "ok" && redisStatus === "ok" ? "ok" : "degraded";
     reply.code(status === "ok" ? 200 : 503);
     return { status, database, redis: redisStatus };
+  });
+
+  // Better Auth owns every /api/auth/* route.
+  app.route({
+    method: ["GET", "POST"],
+    url: "/api/auth/*",
+    handler: async (req, reply) => {
+      const url = new URL(req.url, env.PUBLIC_URL);
+      const headers = new Headers();
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (typeof v === "string") headers.set(k, v);
+        else if (Array.isArray(v)) headers.set(k, v.join(", "));
+      }
+      const init: RequestInit = { method: req.method, headers };
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        init.body = JSON.stringify(req.body);
+      }
+      const response = await auth.handler(new Request(url, init));
+      reply.code(response.status);
+      response.headers.forEach((value, key) => reply.header(key, value));
+      return reply.send(await response.text());
+    },
+  });
+
+  app.get("/api/me", async (req) => {
+    const headers = new Headers();
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (typeof v === "string") headers.set(k, v);
+      else if (Array.isArray(v)) headers.set(k, v.join(", "));
+    }
+    const { orgId } = await requireSession(req);
+    const session = await auth.api.getSession({ headers });
+    const orgs = await auth.api.listOrganizations({ headers });
+    const org = orgs.find((o) => o.id === orgId);
+    return {
+      user: { id: session!.user.id, email: session!.user.email, name: session!.user.name },
+      org: { id: orgId, name: org?.name ?? "" },
+    };
   });
 
   return app;

@@ -8,9 +8,13 @@ const orgA = `org_${randomUUID().slice(0, 8)}`;
 const orgB = `org_${randomUUID().slice(0, 8)}`;
 
 beforeAll(async () => {
+  // Task 6 replaced this table's schema with the one Better Auth generates.
+  // Unlike the Task 3 placeholder, organization.createdAt has no DB-side
+  // default there -- Better Auth's own insert path always sets it
+  // explicitly -- so a direct insert (as here) must supply it too.
   await ownerDb.insert(organization).values([
-    { id: orgA, name: "Org A", slug: orgA },
-    { id: orgB, name: "Org B", slug: orgB },
+    { id: orgA, name: "Org A", slug: orgA, createdAt: new Date() },
+    { id: orgB, name: "Org B", slug: orgB, createdAt: new Date() },
   ]);
   await ownerDb.insert(nodes).values([
     { orgId: orgA, name: "a-node", publicKey: new Uint8Array(32).fill(1) },
