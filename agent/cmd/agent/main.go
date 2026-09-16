@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -22,8 +24,12 @@ func main() {
 
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newEnrollCmd())
+	root.AddCommand(newRunCmd())
 
-	if err := root.ExecuteContext(context.Background()); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := root.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -118,5 +124,47 @@ func newEnrollCmd() *cobra.Command {
 		"control plane agent URL — the AGENT_PORT listener (NodeService), not the browser PORT listener")
 	cmd.Flags().StringVar(&enrollName, "name", "", "name for this node (defaults to the hostname)")
 	_ = cmd.MarkFlagRequired("code")
+	return cmd
+}
+
+// newRunCmd starts the long-lived, authenticated connect loop: it dials the
+// control plane, reports this node's inventory, and keeps sampling and
+// reconnecting until the process is asked to stop.
+func newRunCmd() *cobra.Command {
+	var fakeProbe bool
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Run the agent in the foreground",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			dir := config.Dir()
+			cfg, err := config.Load(dir)
+			if err != nil {
+				return err
+			}
+			if !cfg.Enrolled() {
+				return fmt.Errorf("this node is not enrolled; run: modelhub-agent enroll --code XXXX-XXXX --server <url>")
+			}
+
+			priv, err := config.NewIdentity(dir).LoadOrCreate()
+			if err != nil {
+				return err
+			}
+
+			probes := inventory.DefaultProbes()
+			if fakeProbe {
+				// Used by CI, which has no GPU and no Mac.
+				probes = []inventory.Probe{inventory.NewFakeProbe(2)}
+			}
+
+			session := &transport.Session{
+				ServerURL:  cfg.ServerURL,
+				NodeID:     cfg.NodeID,
+				PrivateKey: priv,
+				Probes:     probes,
+			}
+			return session.Run(cmd.Context())
+		},
+	}
+	cmd.Flags().BoolVar(&fakeProbe, "fake-probe", false, "report synthetic devices instead of real hardware")
 	return cmd
 }
