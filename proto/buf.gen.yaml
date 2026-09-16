@@ -1,0 +1,12 @@
+version: v2
+clean: true
+plugins:
+  - remote: buf.build/bufbuild/es
+    out: ../packages/proto-ts/src/gen
+    opt: [target=ts]
+  - remote: buf.build/protocolbuffers/go
+    out: ../agent/gen
+    opt: [paths=source_relative]
+  - remote: buf.build/connectrpc/go
+    out: ../agent/gen
+    opt: [paths=source_relative]

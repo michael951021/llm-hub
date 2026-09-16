@@ -1,0 +1,52 @@
+syntax = "proto3";
+package modelhub.v1;
+
+option go_package = "github.com/modelhub/agent/gen/modelhub/v1;modelhubv1";
+
+message HostInfo {
+  string hostname = 1;
+  string platform = 2;              // "darwin" | "linux" | "windows"
+  string arch = 3;                  // "arm64" | "amd64"
+  string os_version = 4;
+  string agent_version = 5;
+  uint64 total_memory_bytes = 6;
+  uint32 cpu_cores = 7;
+}
+
+enum DeviceKind {
+  DEVICE_KIND_UNSPECIFIED = 0;
+  DEVICE_KIND_CPU = 1;
+  DEVICE_KIND_CUDA = 2;
+  DEVICE_KIND_METAL = 3;
+}
+
+enum MemoryPressure {
+  MEMORY_PRESSURE_UNSPECIFIED = 0;
+  MEMORY_PRESSURE_NORMAL = 1;
+  MEMORY_PRESSURE_WARN = 2;
+  MEMORY_PRESSURE_CRITICAL = 3;
+}
+
+// Static facts about a device. Reported once per connection.
+message Device {
+  string local_id = 1;              // stable within the node: "cuda:0", "metal:0", "cpu:0"
+  DeviceKind kind = 2;
+  uint32 index = 3;
+  string name = 4;
+  uint64 total_bytes = 5;
+  string driver_version = 6;
+  string compute_capability = 7;
+  uint64 wired_limit_bytes = 8;     // metal only; 0 elsewhere
+}
+
+// Changing facts about a device. Reported on an interval.
+message DeviceSample {
+  string local_id = 1;
+  uint64 used_bytes = 2;            // everything in use: ours plus foreign
+  uint64 managed_bytes = 3;         // what our own shards hold; always 0 in slice 1
+  double utilization = 4;           // 0..1
+  double temperature_c = 5;
+  double power_watts = 6;
+  MemoryPressure pressure = 7;
+  int64 sampled_at_unix_ms = 8;
+}

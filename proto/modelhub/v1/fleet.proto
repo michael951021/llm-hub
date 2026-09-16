@@ -1,0 +1,50 @@
+syntax = "proto3";
+package modelhub.v1;
+
+import "modelhub/v1/common.proto";
+
+option go_package = "github.com/modelhub/agent/gen/modelhub/v1;modelhubv1";
+
+// Called by the browser with a session cookie. Every method is org-scoped.
+service FleetService {
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc CreatePairingCode(CreatePairingCodeRequest) returns (CreatePairingCodeResponse);
+}
+
+message ListNodesRequest {}
+message ListNodesResponse { repeated NodeView nodes = 1; }
+message GetNodeRequest { string node_id = 1; }
+message GetNodeResponse { NodeView node = 1; }
+
+message CreatePairingCodeRequest { string node_name = 1; }
+message CreatePairingCodeResponse {
+  string code = 1;
+  int64 expires_at_unix_ms = 2;
+}
+
+message NodeView {
+  string id = 1;
+  string name = 2;
+  string status = 3;                // "online" | "degraded" | "offline"
+  HostInfo host = 4;
+  int64 last_seen_unix_ms = 5;
+  repeated DeviceView devices = 6;
+}
+
+// A device with its budget already computed by the control plane.
+// The browser never does memory arithmetic.
+message DeviceView {
+  string id = 1;
+  string local_id = 2;
+  DeviceKind kind = 3;
+  string name = 4;
+  uint64 total_bytes = 5;
+  uint64 managed_bytes = 6;
+  uint64 foreign_bytes = 7;
+  uint64 headroom_bytes = 8;
+  uint64 available_bytes = 9;
+  double utilization = 10;
+  MemoryPressure pressure = 11;
+  bool schedulable = 12;
+}

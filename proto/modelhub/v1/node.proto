@@ -1,0 +1,56 @@
+syntax = "proto3";
+package modelhub.v1;
+
+import "modelhub/v1/common.proto";
+
+option go_package = "github.com/modelhub/agent/gen/modelhub/v1;modelhubv1";
+
+// Called by agents. Enroll is unauthenticated (the pairing code is the
+// credential); Connect requires the Ed25519 node-auth header.
+service NodeService {
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  rpc Connect(stream AgentMessage) returns (stream ServerMessage);
+}
+
+message EnrollRequest {
+  string pairing_code = 1;
+  bytes public_key = 2;             // Ed25519 public key, exactly 32 bytes
+  string node_name = 3;
+  HostInfo host = 4;
+}
+
+message EnrollResponse {
+  string node_id = 1;
+  string org_id = 2;
+  string org_name = 3;
+}
+
+message AgentMessage {
+  oneof payload {
+    Hello hello = 1;
+    InventoryReport inventory = 2;
+    SampleBatch samples = 3;
+  }
+}
+
+message Hello {
+  string agent_version = 1;
+  HostInfo host = 2;
+}
+
+message InventoryReport { repeated Device devices = 1; }
+message SampleBatch { repeated DeviceSample samples = 1; }
+
+message ServerMessage {
+  oneof payload {
+    HelloAck hello_ack = 1;
+    AgentConfig config = 2;
+  }
+}
+
+message HelloAck {
+  string node_id = 1;
+  uint32 sample_interval_ms = 2;
+}
+
+message AgentConfig { uint32 sample_interval_ms = 1; }
