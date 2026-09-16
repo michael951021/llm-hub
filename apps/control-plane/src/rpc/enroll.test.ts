@@ -5,6 +5,7 @@ import { appSql, ownerSql, ownerDb, organization, nodes } from "@modelhub/db";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../app.js";
 import { mintPairingCode } from "../domain/pairing.js";
+import { enrollNode, EnrollmentError } from "../domain/nodes.js";
 import { redis } from "../redis.js";
 
 let app: FastifyInstance;
@@ -133,5 +134,35 @@ describe("NodeService.Enroll", () => {
       host: { hostname: "h", platform: "linux", arch: "amd64" },
     });
     expect(accepted.statusCode).toBe(200);
+  });
+
+  it("maps a concurrent duplicate-key race to EnrollmentError for the loser", async () => {
+    // Two valid, distinct pairing codes racing the same public key: both
+    // can pass the app-level ownerDb uniqueness check (it takes no lock)
+    // before either INSERT commits, so the loser must be caught by the
+    // nodes_public_key_idx unique-violation mapping instead, not surface
+    // as an opaque/unmapped error. This calls enrollNode directly (not
+    // over HTTP) so the assertion is on the domain error type itself.
+    const publicKey = newPublicKey();
+    const first = await mintPairingCode(orgId, "user_1", "race-1");
+    const second = await mintPairingCode(orgId, "user_1", "race-2");
+    const host = {
+      hostname: "h", platform: "linux", arch: "amd64",
+      osVersion: "", agentVersion: "", totalMemoryBytes: 0n, cpuCores: 0,
+    };
+
+    const results = await Promise.allSettled([
+      enrollNode({ pairingCode: first.code, publicKey, nodeName: "race-1", host }),
+      enrollNode({ pairingCode: second.code, publicKey, nodeName: "race-2", host }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+
+    const loser = (rejected as PromiseRejectedResult[])[0]!;
+    expect(loser.reason).toBeInstanceOf(EnrollmentError);
+    expect((loser.reason as EnrollmentError).message).toMatch(/already enrolled/);
   });
 });
