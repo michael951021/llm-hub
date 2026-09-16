@@ -83,12 +83,39 @@ export async function authenticateNode(
     .limit(1);
   if (!row) throw new NodeAuthError("unknown node");
 
-  const ok = verify(
-    null,
-    Buffer.from(`${nodeId}.${millis}.${nonce}`),
-    toKeyObject(row.publicKey),
-    Buffer.from(signature, "base64url"),
-  );
+  // Key reconstruction and verification are wrapped narrowly -- just this,
+  // not the DB/Redis calls around it -- because a stored public key that
+  // doesn't round-trip through the fixed SPKI prefix (corrupted row, future
+  // migration bug, manual edit) throws a raw OpenSSL error rather than
+  // returning false. This sits in front of a public, unauthenticated
+  // endpoint, so that must still come out as a clean NodeAuthError, not an
+  // unmapped 500 -- but it is a data problem, not a forged-signature
+  // problem, so it gets its own message and is logged with the node id:
+  // silently reading it as "unauthenticated" would hide a corrupted row
+  // forever.
+  let keyObject: KeyObject;
+  try {
+    keyObject = toKeyObject(row.publicKey);
+  } catch (err) {
+    console.error("[node-auth] stored public key failed to parse", { nodeId: row.id, err });
+    throw new NodeAuthError("stored node key is invalid");
+  }
+
+  let ok: boolean;
+  try {
+    ok = verify(
+      null,
+      Buffer.from(`${nodeId}.${millis}.${nonce}`),
+      keyObject,
+      Buffer.from(signature, "base64url"),
+    );
+  } catch {
+    // Distinct from the stored-key case above: the key parsed fine, so a
+    // throw here means the *supplied* signature bytes were unusable, which
+    // is just a more emphatic way for a bad signature to fail than
+    // verify() returning false.
+    throw new NodeAuthError("invalid signature");
+  }
   if (!ok) throw new NodeAuthError("invalid signature");
 
   // One nonce, one use. The replay cache lives in Redis, not an in-process

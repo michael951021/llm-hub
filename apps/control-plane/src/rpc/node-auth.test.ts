@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { generateKeyPairSync, sign, randomUUID, type KeyObject } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign, randomUUID, type KeyObject } from "node:crypto";
 import { ownerDb, organization, nodes } from "@modelhub/db";
 import { authenticateNode, NodeAuthError } from "./node-auth.js";
 
@@ -48,6 +48,11 @@ describe("node authentication", () => {
     await expect(authenticateNode(header(nodeId, privateKey, stale))).rejects.toThrow(/timestamp/i);
   });
 
+  it("rejects a future-dated timestamp outside the skew window", async () => {
+    const future = Date.now() + 10 * 60_000;
+    await expect(authenticateNode(header(nodeId, privateKey, future))).rejects.toThrow(/timestamp/i);
+  });
+
   it("rejects a replayed nonce", async () => {
     const nonce = randomUUID();
     const h = header(nodeId, privateKey, Date.now(), nonce);
@@ -63,5 +68,24 @@ describe("node authentication", () => {
 
   it("rejects a malformed header", async () => {
     await expect(authenticateNode("ModelHubNode garbage")).rejects.toThrow(NodeAuthError);
+  });
+
+  it("fails safely, as NodeAuthError, when the stored public key is corrupted", async () => {
+    // Not attacker-reachable through the header -- the attacker doesn't
+    // control the database row -- but a corrupted/wrong-length stored key
+    // (bad migration, manual edit) must still come out as a clean auth
+    // failure rather than an unmapped OpenSSL error, since this sits in
+    // front of a public, unauthenticated endpoint.
+    // Random, not all-zero: nodes.public_key is uniquely indexed, and a
+    // fixed value would collide with the same row inserted by a previous
+    // run of this test against a persistent dev database.
+    const [row] = await ownerDb.insert(nodes).values({
+      orgId, name: "corrupted", publicKey: randomBytes(16), // wrong length
+    }).returning({ id: nodes.id });
+    const corruptedNodeId = row!.id;
+
+    await expect(
+      authenticateNode(header(corruptedNodeId, privateKey)),
+    ).rejects.toThrow(NodeAuthError);
   });
 });
