@@ -1,6 +1,7 @@
 packages:
   - "packages/*"
   - "apps/*"
+  - "e2e"
 allowBuilds:
   '@bufbuild/buf': true
   esbuild: true

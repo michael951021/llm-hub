@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  typescript:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_USER: modelhub_owner
+          POSTGRES_PASSWORD: devpassword
+          POSTGRES_DB: modelhub
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U modelhub_owner -d modelhub"
+          --health-interval 2s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6380:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgres://modelhub_app:devpassword@localhost:5433/modelhub
+      DATABASE_OWNER_URL: postgres://modelhub_owner:devpassword@localhost:5433/modelhub
+      REDIS_URL: redis://localhost:6380
+      PUBLIC_URL: http://localhost:5173
+      PORT: 3000
+      AGENT_PORT: 3001
+      BETTER_AUTH_SECRET: ci-secret-0123456789abcdef0123456789abcdef
+      # Task 7: required at import time by apps/control-plane/src/env.ts
+      # (keys the pairing-code HMAC). Every control-plane test, and the
+      # e2e suite below (which imports that same env.ts through
+      # buildApp/buildAgentApp), fails at import without this.
+      PAIRING_CODE_PEPPER: ci-secret-fedcba9876543210fedcba9876543210
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      # The e2e job builds and runs the real Go agent binary (go build +
+      # go run) against the TypeScript control plane started in-process,
+      # so this job needs a Go toolchain too, not just the `go` job below.
+      # agent/go.mod's toolchain directive is 1.24.0 (moved from 1.23
+      # during Task 13) -- setup-go must satisfy that or `go build` fails
+      # before the e2e test even starts.
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @modelhub/db migrate
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm test:e2e
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Must match agent/go.mod's `go 1.24.0` toolchain directive.
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - run: cd agent && go vet ./... && go test ./... -race
+
+  proto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # buf breaking compares against git history (the PR's base
+          # branch below), which needs more than the default shallow
+          # single-commit checkout.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      # buf is a root devDependency (@bufbuild/buf) rather than the
+      # marketplace action, so this job needs the JS deps installed --
+      # but not the full DB/Redis/env setup the typescript job needs,
+      # since buf only reads proto/.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec buf lint proto
+      # Only meaningful on a pull request, where there is a base branch to
+      # diff against; a push to main has nothing to compare (the ref being
+      # checked out *is* the new main). This is what stops slice 2 from
+      # silently shipping a control plane that cannot talk to yesterday's
+      # agents: a PR that breaks wire compatibility fails here before merge.
+      - if: github.event_name == 'pull_request'
+        run: pnpm exec buf breaking proto --against ".git#branch=origin/${{ github.base_ref }},subdir=proto"

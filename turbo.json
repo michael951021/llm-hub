@@ -1,5 +1,18 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalEnv": [
+    "DATABASE_URL",
+    "DATABASE_OWNER_URL",
+    "REDIS_URL",
+    "PUBLIC_URL",
+    "PORT",
+    "AGENT_PORT",
+    "BETTER_AUTH_SECRET",
+    "PAIRING_CODE_PEPPER",
+    "NODE_AUTH_SKEW_MS",
+    "SAMPLE_INTERVAL_MS",
+    "PAIRING_CODE_TTL_MS"
+  ],
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
     "test": { "dependsOn": ["^build"] },

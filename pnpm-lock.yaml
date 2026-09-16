@@ -295,6 +295,21 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.20.2)(jsdom@25.0.1)(lightningcss@1.33.0)
 
+  e2e:
+    devDependencies:
+      '@modelhub/control-plane':
+        specifier: workspace:*
+        version: link:../apps/control-plane
+      '@types/node':
+        specifier: ^22.20.2
+        version: 22.20.2
+      dotenv:
+        specifier: ^16.4.5
+        version: 16.6.1
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.20.2)(jsdom@25.0.1)(lightningcss@1.33.0)
+
   packages/core:
     devDependencies:
       typescript:
@@ -316,6 +331,9 @@ importers:
       '@types/node':
         specifier: ^22.20.2
         version: 22.20.2
+      dotenv:
+        specifier: ^16.4.5
+        version: 16.6.1
       drizzle-kit:
         specifier: ^0.28.0
         version: 0.28.1
