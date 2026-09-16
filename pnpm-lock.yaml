@@ -212,6 +212,9 @@ importers:
         specifier: ^3.23.8
         version: 3.25.76
     devDependencies:
+      '@connectrpc/connect-node':
+        specifier: ^2.0.0
+        version: 2.2.0(@bufbuild/protobuf@2.15.0)(@connectrpc/connect@2.2.0(@bufbuild/protobuf@2.15.0))
       '@types/node':
         specifier: ^22.20.2
         version: 22.20.2

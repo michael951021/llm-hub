@@ -1,10 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { FastifyInstance } from "fastify";
 import { sql } from "drizzle-orm";
 import { member, organization, ownerDb } from "@modelhub/db";
 import { buildApp } from "../app.js";
 
-let app: FastifyInstance;
+let app: Awaited<ReturnType<typeof buildApp>>;
 const email = `t${Date.now()}@example.com`;
 
 beforeAll(async () => { app = await buildApp(); });

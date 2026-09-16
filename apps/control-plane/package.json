@@ -22,6 +22,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@connectrpc/connect-node": "^2.0.0",
     "@types/node": "^22.20.2",
     "dotenv": "^16.4.5",
     "tsx": "^4.19.0",

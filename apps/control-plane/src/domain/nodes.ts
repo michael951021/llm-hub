@@ -1,5 +1,6 @@
-import { eq } from "drizzle-orm";
-import { ownerDb, nodes, organization, withOrg } from "@modelhub/db";
+import { and, eq, notInArray } from "drizzle-orm";
+import { ownerDb, nodes, organization, withOrg, devices } from "@modelhub/db";
+import { DeviceKind, MemoryPressure, type Device, type DeviceSample } from "@modelhub/proto";
 import { redeemPairingCode } from "./pairing.js";
 
 export class EnrollmentError extends Error {
@@ -96,4 +97,115 @@ export async function enrollNode(
     .from(organization).where(eq(organization.id, orgId)).limit(1);
 
   return { nodeId: inserted!.id, orgId, orgName: org?.name ?? "" };
+}
+
+const KIND_NAMES: Record<number, string> = {
+  [DeviceKind.CPU]: "cpu",
+  [DeviceKind.CUDA]: "cuda",
+  [DeviceKind.METAL]: "metal",
+};
+const PRESSURE_NAMES: Record<number, string> = {
+  [MemoryPressure.NORMAL]: "normal",
+  [MemoryPressure.WARN]: "warn",
+  [MemoryPressure.CRITICAL]: "critical",
+};
+
+/**
+ * Upserts the devices a node reports on this connection and deletes the
+ * ones it no longer reports. A device that vanished — a GPU pulled out, or
+ * a driver that stopped enumerating it — must stop being schedulable
+ * rather than linger as a stale, unreachable row. When `reported` is
+ * empty, every device row for this node is deleted: silence about devices
+ * is itself the report "this node has none right now", not a no-op.
+ *
+ * Scoped to (nodeId, orgId) throughout via withOrg's RLS context and an
+ * explicit nodeId predicate on the delete, so this can never touch another
+ * node's — or another org's — rows.
+ */
+export async function recordInventory(
+  orgId: string, nodeId: string, reported: Device[],
+): Promise<void> {
+  await withOrg(orgId, async (tx) => {
+    for (const d of reported) {
+      const values = {
+        orgId, nodeId,
+        localId: d.localId,
+        kind: KIND_NAMES[d.kind] ?? "cpu",
+        index: d.index,
+        name: d.name,
+        totalBytes: d.totalBytes,
+        wiredLimitBytes: d.wiredLimitBytes,
+        driverVersion: d.driverVersion,
+        computeCapability: d.computeCapability,
+      };
+      await tx.insert(devices).values(values).onConflictDoUpdate({
+        target: [devices.nodeId, devices.localId],
+        set: {
+          kind: values.kind,
+          index: values.index,
+          name: values.name,
+          totalBytes: values.totalBytes,
+          wiredLimitBytes: values.wiredLimitBytes,
+          driverVersion: values.driverVersion,
+          computeCapability: values.computeCapability,
+        },
+      });
+    }
+
+    const keep = reported.map((d) => d.localId);
+    await tx.delete(devices).where(
+      keep.length > 0
+        ? and(eq(devices.nodeId, nodeId), notInArray(devices.localId, keep))
+        : eq(devices.nodeId, nodeId),
+    );
+  });
+}
+
+/**
+ * Applies a batch of device samples and marks the node as having just been
+ * seen. A no-op on an empty batch: an empty SampleBatch is not a claim
+ * that the node has no devices (recordInventory owns that claim), so it
+ * must not touch any device row — but the node itself is still alive, so
+ * whether the samples list is empty is irrelevant to lastSeenAt in the
+ * stream handler, which calls this once per SampleBatch message.
+ */
+export async function recordSamples(
+  orgId: string, nodeId: string, samples: DeviceSample[],
+): Promise<void> {
+  await withOrg(orgId, async (tx) => {
+    for (const s of samples) {
+      await tx.update(devices).set({
+        lastUsedBytes: s.usedBytes,
+        lastManagedBytes: s.managedBytes,
+        lastUtilization: s.utilization,
+        lastPressure: PRESSURE_NAMES[s.pressure] ?? "normal",
+        lastSampleAt: new Date(Number(s.sampledAtUnixMs)),
+      }).where(and(eq(devices.nodeId, nodeId), eq(devices.localId, s.localId)));
+    }
+    await tx.update(nodes)
+      .set({ lastSeenAt: new Date(), status: "online" })
+      .where(eq(nodes.id, nodeId));
+  });
+}
+
+/**
+ * Marks a node online and refreshes the host facts it just reported over
+ * `Hello`. Called once at the start of each Connect stream.
+ */
+export async function markNodeOnline(
+  orgId: string, nodeId: string, host: EnrollInput["host"],
+): Promise<void> {
+  await withOrg(orgId, (tx) =>
+    tx.update(nodes).set({
+      status: "online",
+      lastSeenAt: new Date(),
+      agentVersion: host.agentVersion,
+      platform: host.platform,
+      arch: host.arch,
+      osVersion: host.osVersion,
+      hostname: host.hostname,
+      totalMemoryBytes: host.totalMemoryBytes,
+      cpuCores: host.cpuCores,
+    }).where(eq(nodes.id, nodeId)),
+  );
 }

@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID, generateKeyPairSync } from "node:crypto";
-import type { FastifyInstance } from "fastify";
 import { appSql, ownerSql, ownerDb, organization, nodes } from "@modelhub/db";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../app.js";
@@ -8,7 +7,7 @@ import { mintPairingCode } from "../domain/pairing.js";
 import { enrollNode, EnrollmentError } from "../domain/nodes.js";
 import { redis } from "../redis.js";
 
-let app: FastifyInstance;
+let app: Awaited<ReturnType<typeof buildApp>>;
 const orgId = `org_${randomUUID().slice(0, 8)}`;
 
 function newPublicKey(): Uint8Array {

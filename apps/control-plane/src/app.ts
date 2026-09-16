@@ -1,4 +1,4 @@
-import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
+import Fastify, { type FastifyError } from "fastify";
 import { sql } from "drizzle-orm";
 import { fastifyConnectPlugin } from "@connectrpc/connect-fastify";
 import { db } from "@modelhub/db";
@@ -8,12 +8,22 @@ import { requireSession } from "./auth/session.js";
 import { env } from "./env.js";
 import { routes } from "./rpc/index.js";
 
-export async function buildApp(): Promise<FastifyInstance> {
+// No explicit return-type annotation: with http2 enabled below, Fastify's
+// factory returns FastifyInstance<Http2Server, ...>, a different (and
+// incompatible) instantiation of the generic from the plain FastifyInstance
+// type — inference carries the real, http2-flavored type through instead.
+export async function buildApp() {
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? "info" },
     // Inventory reports (Task 10) travel over this same server; the
     // Fastify default (1MiB) is too small for those payloads.
     bodyLimit: 4 * 1024 * 1024,
+    // NodeService.Connect (Task 10) is a true bidirectional stream: the
+    // handler must read agent messages and yield server messages
+    // concurrently over the same request. That needs HTTP/2 framing, not
+    // HTTP/1.1 request/response — this is cleartext h2c (no TLS), which is
+    // what @connectrpc/connect-node's Node transport speaks in-cluster.
+    http2: true,
   });
 
   await app.register(fastifyConnectPlugin, { routes });
