@@ -1,9 +1,17 @@
 // vitest's defineConfig, not vite's — vite's does not accept the `test` key.
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 export default defineConfig({
   plugins: [react()],
+  // The rest of the repo keeps a single .env at the monorepo root (see
+  // apps/control-plane/vitest.setup.ts) — point Vite's env loading there too
+  // instead of expecting a second .env inside apps/web.
+  envDir: path.resolve(__dirname, "../.."),
   server: {
     port: 5173,
     // Same-origin in dev so the session cookie works without CORS. Both
