@@ -30,16 +30,23 @@ export async function enrollNode(
     throw new EnrollmentError("public key must be a 32-byte Ed25519 key");
   }
 
-  const { orgId, nodeName } = await redeemPairingCode(input.pairingCode);
-
-  // Global, not scoped to orgId: one physical machine must not be able to
-  // hold identities in two tenants. Runs on the owner connection for the
-  // same reason redeemPairingCode does — there is no org context yet.
+  // Checked before redeeming the pairing code, and global rather than
+  // scoped to any org: one physical machine must not be able to hold
+  // identities in two tenants, and a machine that is already enrolled
+  // should not burn a fresh, single-use code on an enrollment that was
+  // always going to fail — the common case here is a person re-running
+  // the agent's enroll command, not an attacker. This is advisory, not
+  // the real guarantee: nodes.public_key also carries a unique index, so
+  // a race that slips past this check still fails at the insert. Runs on
+  // the owner connection for the same reason redeemPairingCode does —
+  // there is no org context yet.
   const existing = await ownerDb.select({ id: nodes.id }).from(nodes)
     .where(eq(nodes.publicKey, input.publicKey)).limit(1);
   if (existing.length > 0) {
     throw new EnrollmentError("this key is already enrolled; re-install to get a new identity");
   }
+
+  const { orgId, nodeName } = await redeemPairingCode(input.pairingCode);
 
   const [inserted] = await withOrg(orgId, (tx) =>
     tx.insert(nodes).values({

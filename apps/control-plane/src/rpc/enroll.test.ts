@@ -100,4 +100,38 @@ describe("NodeService.Enroll", () => {
     expect((await enroll(payload(first.code))).statusCode).toBe(200);
     expect((await enroll(payload(second.code))).statusCode).toBeGreaterThanOrEqual(400);
   });
+
+  it("does not consume the pairing code when enrollment fails on a duplicate key", async () => {
+    const registeredKey = newPublicKey();
+    const freshKey = newPublicKey();
+
+    // Register registeredKey once so it is a genuine duplicate on the next attempt.
+    const setup = await mintPairingCode(orgId, "user_1", "already-enrolled");
+    expect((await enroll({
+      pairingCode: setup.code,
+      publicKey: Buffer.from(registeredKey).toString("base64"),
+      nodeName: "already-enrolled",
+      host: { hostname: "h", platform: "linux", arch: "amd64" },
+    })).statusCode).toBe(200);
+
+    const { code } = await mintPairingCode(orgId, "user_1", "retry");
+
+    const rejected = await enroll({
+      pairingCode: code,
+      publicKey: Buffer.from(registeredKey).toString("base64"),
+      nodeName: "retry",
+      host: { hostname: "h", platform: "linux", arch: "amd64" },
+    });
+    expect(rejected.statusCode).toBeGreaterThanOrEqual(400);
+
+    // The code must not have been burned by the failed attempt above: it
+    // should still redeem successfully for a different, unregistered key.
+    const accepted = await enroll({
+      pairingCode: code,
+      publicKey: Buffer.from(freshKey).toString("base64"),
+      nodeName: "retry",
+      host: { hostname: "h", platform: "linux", arch: "amd64" },
+    });
+    expect(accepted.statusCode).toBe(200);
+  });
 });
