@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -101,6 +102,12 @@ func (i *Inventory) SampleAll(ctx context.Context) ([]Sample, error) {
 		}
 		s, err := p.Sample(ctx, d)
 		if err != nil {
+			// Log and drop: one device that has stopped sampling must not
+			// stop the node reporting the rest. Deliberately unfiltered and
+			// undeduplicated — a broken GPU will be noisy at the sample
+			// interval, and that noise is preferable to a device failing
+			// silently. Slice 8's observability work replaces this wholesale.
+			slog.Warn("inventory: device sample failed", "local_id", d.LocalID, "probe", p.Name(), "err", err)
 			continue
 		}
 		samples = append(samples, s)

@@ -42,8 +42,20 @@ func (n *nvmlProbe) Discover(context.Context) ([]Device, error) {
 		}
 		major, minor, _ := handle.GetCudaComputeCapability()
 
+		// The UUID is stable across reboots and PCIe re-enumeration; the
+		// enumeration index NVIDIA explicitly disclaims as stable. The
+		// control plane deletes any device not reported on an upsert pass,
+		// so an index-based id would churn every device row on this node if
+		// the BIOS ever reassigns indices. Fall back to the index-based id
+		// only if the driver won't report a UUID, so a device still shows up
+		// (less stably) rather than vanishing.
+		localID := fmt.Sprintf("cuda:%d", i)
+		if uuid, ret := handle.GetUUID(); ret == nvml.SUCCESS && uuid != "" {
+			localID = uuid
+		}
+
 		devices = append(devices, Device{
-			LocalID:           fmt.Sprintf("cuda:%d", i),
+			LocalID:           localID,
 			Kind:              KindCUDA,
 			Index:             i,
 			Name:              name,
