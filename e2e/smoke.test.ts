@@ -15,36 +15,76 @@ import { buildAgentApp } from "../apps/control-plane/src/agent-app.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const agentModuleDir = join(__dirname, "..", "agent");
 
+const KEYCHAIN_SERVICE = "com.modelhub.agent";
+const KEYCHAIN_ACCOUNT = "node-key";
+const CLEAR_KEYCHAIN_ENV = "MODELHUB_E2E_CLEAR_KEYCHAIN";
+
 /**
- * Best-effort removal of this machine's OS-keychain-stored agent identity,
- * so repeated local runs of this suite each enroll a fresh node instead of
- * colliding on "this key is already enrolled".
+ * Guards against this suite colliding with (or silently destroying) a real
+ * node identity stored in this machine's OS keychain.
  *
  * config.NewIdentity() (agent/internal/config/identity.go) deliberately
  * prefers the OS keychain over a config-dir-scoped file, keyed by a fixed
- * service/account ("com.modelhub.agent" / "node-key") -- not by
+ * service/account (KEYCHAIN_SERVICE / KEYCHAIN_ACCOUNT) -- not by
  * MODELHUB_CONFIG_DIR. That's correct production behavior (one real
  * machine should have one real node identity), but it means this test's
  * MODELHUB_CONFIG_DIR scratch directory does NOT isolate identity storage
- * on a machine with a working keychain: the compiled binary still reads
- * and writes the same real keychain entry every run. A CI container is
- * fresh every time and never hits this; a developer's Mac reuses its
- * keychain across every local run of this suite. Rather than changing the
- * agent's identity storage (out of scope -- see the task brief), this
- * clears the one entry the agent itself would have written, exactly what
- * a fresh machine would start from. Only attempted on darwin, where
- * `security` exists; a missing command or a not-found entry are both
- * silently fine.
+ * on a machine with a working keychain: the compiled binary reads and
+ * writes the same real keychain entry every run. A CI container is fresh
+ * every time and never hits this (no darwin, no keychain, no leftover
+ * entry). A developer's Mac can hit it two ways: this suite's own earlier
+ * run, or a real identity from manually running `modelhub-agent enroll`
+ * during other testing -- and this code has no way to tell those apart.
+ *
+ * So this does NOT delete anything by default. If an entry exists, it
+ * fails loudly with the exact command to clear it by hand. Only when
+ * MODELHUB_E2E_CLEAR_KEYCHAIN=1 is set does it delete -- and even then it
+ * warns first, naming exactly what it's about to destroy, and lets a
+ * deletion failure surface instead of swallowing it.
+ *
+ * This guard is a stopgap for the collision, not a fix for it: Task 19
+ * scopes the keychain identity by config directory, after which this
+ * entry no longer collides across runs and this whole function becomes
+ * vestigial. Whoever lands that task should remove it.
  */
-function clearMacKeychainIdentity(): void {
+function guardMacKeychainIdentity(): void {
   if (process.platform !== "darwin") return;
-  try {
-    execFileSync("security", ["delete-generic-password", "-s", "com.modelhub.agent", "-a", "node-key"], {
-      stdio: "ignore",
-    });
-  } catch {
-    // Nothing stored yet, or no keychain available -- either way, fine.
+
+  const exists = (() => {
+    try {
+      execFileSync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT], {
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      return false; // no entry -- nothing to guard against
+    }
+  })();
+  if (!exists) return;
+
+  if (process.env[CLEAR_KEYCHAIN_ENV] !== "1") {
+    throw new Error(
+      `A macOS keychain entry already exists for service "${KEYCHAIN_SERVICE}", account ` +
+        `"${KEYCHAIN_ACCOUNT}". This is where the real modelhub-agent binary stores its node ` +
+        `identity (see agent/internal/config/identity.go), and it is NOT scoped by ` +
+        `MODELHUB_CONFIG_DIR -- so this e2e suite would reuse whatever key is already there, ` +
+        `and the server would reject it as "already enrolled". This could be a leftover from ` +
+        `an earlier run of this suite, or a real identity from manually enrolling an agent. ` +
+        `This test will not delete it silently.\n\n` +
+        `If you're sure it's safe to discard (e.g. it's just this suite's own leftover), ` +
+        `either clear it by hand:\n` +
+        `  security delete-generic-password -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT}\n` +
+        `or re-run with MODELHUB_E2E_CLEAR_KEYCHAIN=1 to have this suite clear it for you.`,
+    );
   }
+
+  console.warn(
+    `[e2e] MODELHUB_E2E_CLEAR_KEYCHAIN=1: deleting macOS keychain entry ` +
+      `service="${KEYCHAIN_SERVICE}" account="${KEYCHAIN_ACCOUNT}" before enrolling.`,
+  );
+  execFileSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT], {
+    stdio: "inherit",
+  });
 }
 
 // There are two listeners in the control plane (see agent-app.ts): buildApp
@@ -101,7 +141,7 @@ function run(binary: string, args: string[], env: NodeJS.ProcessEnv): Promise<vo
 }
 
 beforeAll(async () => {
-  clearMacKeychainIdentity();
+  guardMacKeychainIdentity();
 
   app = await buildApp();
   await app.listen({ port: 0, host: "127.0.0.1" });
@@ -130,8 +170,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   agent?.kill("SIGTERM");
-  await Promise.all([app.close(), agentApp.close()]);
-  rmSync(agentDir, { recursive: true, force: true });
+  // beforeAll can throw before app/agentApp/agentDir are ever assigned
+  // (e.g. guardMacKeychainIdentity() refusing to proceed) -- guard each
+  // teardown step so that case reports its real cause instead of a
+  // follow-on "Cannot read properties of undefined" here.
+  await Promise.all([app?.close(), agentApp?.close()]);
+  if (agentDir) rmSync(agentDir, { recursive: true, force: true });
 });
 
 describe("slice 1 end to end", () => {

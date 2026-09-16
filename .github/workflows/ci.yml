@@ -54,8 +54,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @modelhub/db migrate
       - run: pnpm typecheck
+      # `pnpm test` (turbo run test) already runs @modelhub/e2e -- it's a
+      # workspace package with its own "test" script, so turbo discovers
+      # and runs it alongside every other package's tests. A separate
+      # `pnpm test:e2e` step here would just re-run the same suite (and
+      # re-build the agent binary) a second time for no added coverage.
+      # `pnpm test:e2e` still exists as a convenience for running only the
+      # e2e suite locally.
       - run: pnpm test
-      - run: pnpm test:e2e
 
   go:
     runs-on: ubuntu-latest
