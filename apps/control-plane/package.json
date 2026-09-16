@@ -1,0 +1,31 @@
+{
+  "name": "@modelhub/control-plane",
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@connectrpc/connect": "^2.0.0",
+    "@connectrpc/connect-fastify": "^2.0.0",
+    "@modelhub/core": "workspace:*",
+    "@modelhub/db": "workspace:*",
+    "@modelhub/proto": "workspace:*",
+    "better-auth": "^1.1.0",
+    "drizzle-orm": "^0.36.0",
+    "fastify": "^5.1.0",
+    "ioredis": "^5.4.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "dotenv": "^16.4.5",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
