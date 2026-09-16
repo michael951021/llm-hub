@@ -1,12 +1,13 @@
 import type { ConnectRouter } from "@connectrpc/connect";
 import { registerNodeService } from "./node-service.js";
+import { registerFleetService } from "./fleet-service.js";
 
 /**
  * Services exposed to authenticated browser sessions, over HTTP/1.1 —
- * mounted on `buildApp()`. Task 11 adds FleetService here.
+ * mounted on `buildApp()`.
  */
-export function browserRoutes(_router: ConnectRouter): void {
-  // FleetService lands here in Task 11.
+export function browserRoutes(router: ConnectRouter): void {
+  registerFleetService(router);
 }
 
 /**
