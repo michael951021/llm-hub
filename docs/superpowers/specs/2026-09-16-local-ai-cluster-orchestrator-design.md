@@ -59,9 +59,14 @@ The motivating example, stated concretely:
   runtimes that do (Ollama, vLLM, llama.cpp, MLX, LM Studio).
 - **Not a general workflow engine.** No cron, no human-in-the-loop approvals,
   no arbitrary business-process automation. LLM graphs specifically.
-- **Not a tensor-parallel framework.** We place *whole model replicas* on
-  devices. Splitting one model's layers across two machines is delegated to the
-  runtime (vLLM's own TP/PP) and never orchestrated by us across nodes.
+- **Not a model-parallelism implementation.** We orchestrate distributed model
+  deployments; we do not implement model parallelism ourselves. The scheduler
+  may allocate multiple GPUs, across one or more nodes, to a single deployment,
+  and it selects and configures the parallelism strategy — tensor (TP),
+  pipeline (PP), expert (EP), or whatever else the runtime supports. The actual
+  model partitioning and collective communication are delegated entirely to the
+  runtime (vLLM today; others as they gain the capability). We decide *which
+  devices and which strategy*; the runtime decides *how the tensors move*.
 - **No billing in v1.** The tenant model must not preclude it; the code must not
   contain it.
 
@@ -79,7 +84,10 @@ of system turns to mud.
 | **Device** | A schedulable compute unit inside a node: a CUDA GPU, an Apple unified-memory GPU, or the CPU. Has a memory budget. |
 | **Runtime** | A process that serves inference: an Ollama daemon, a vLLM server, a llama.cpp server, an MLX server. Managed or discovered. |
 | **Model** | A logical artifact in the org's catalog, e.g. `qwen3-30b-a3b:q4`. Identified by name + quantization, not by where it lives. |
-| **Replica** | One loaded instance of a Model on one Device, served by one Runtime. The unit of memory accounting and queueing. |
+| **Replica** | One servable instance of a Model, served by one Runtime, occupying a **DeviceSet** of one or more Devices. The unit of routing, queueing, and lifecycle. |
+| **Shard** | The portion of a Replica resident on a single Device. The unit of **memory accounting**. A single-device Replica has exactly one Shard. |
+| **DeviceSet** | The ordered set of Devices a Replica occupies, together with its ParallelismPlan. May span Nodes within one Site. |
+| **ParallelismPlan** | The `{tp, pp, ep, dp}` degrees and runtime launch configuration the scheduler chose for a Replica. Selected by us, executed by the Runtime. |
 | **Pool** | A named, logical model the user references in flows: "fast-local", "big-reasoner". Backed by 1..N replicas, possibly of different Models, with a routing policy. **Flows reference pools, never devices.** |
 | **Provider** | An external API treated as an unlimited pool: Anthropic, OpenAI, an OpenAI-compatible URL. |
 | **Flow** | A DAG the user draws. Versioned. Compiles to a Plan. |
@@ -90,8 +98,8 @@ of system turns to mud.
 
 The single most important sentence in this document:
 
-> **A flow node names a Pool. The scheduler maps Pool → Replica → Device. The
-> user may constrain that mapping but never performs it by hand.**
+> **A flow node names a Pool. The scheduler maps Pool → Replica → DeviceSet.
+> The user may constrain that mapping but never performs it by hand.**
 
 This is what makes "change how much each node splits its outputs and to who" a
 policy edit rather than a graph rewrite, and it is what lets the same flow run
@@ -258,11 +266,11 @@ GoReleaser for agent artifacts.
 
 ```
 Org ─┬─ Member, ApiKey, Setting
-     ├─ Node ──── Device ──── Replica ──┐
-     │             │                     │
-     │             └── Runtime ──────────┤
-     ├─ Model ───────────────────────────┤  (catalog entry; ModelProfile)
-     ├─ Pool ────── PoolMember ──────────┘  (pool → model, with weight+constraints)
+     ├─ Node ─┬─ Device ──┐
+     │        └─ Runtime ─┴─► ReplicaShard ──► Replica   (N shards : 1 replica;
+     ├─ Model ──────────────────────▲                     shards may span nodes
+     │                              │                     within one site)
+     ├─ Pool ───── PoolMember ──────┴─► Model | Provider
      ├─ Provider (external API credential)
      ├─ Flow ───── FlowVersion ───── Endpoint
      └─ Run ────── RunStep ────── PlacementDecision
@@ -284,10 +292,17 @@ runtimes:   id, node_id, kind('ollama'|'vllm'|'llamacpp'|'mlx'|'lmstudio'),
 models:     id, org_id, ref, quantization, params_b, family,
             profile jsonb   -- ModelProfile (§5.3)
 
-replicas:   id, device_id, model_id, runtime_id,
-            status('loading'|'ready'|'draining'|'evicting'|'failed'),
-            resident_bytes, kv_bytes_per_slot, max_slots,
+replicas:   id, model_id, runtime_id, leader_node_id, site_id,
+            status('loading'|'ready'|'degraded'|'draining'|'evicting'|'failed'),
+            span('single'|'multi-gpu'|'multi-node'),
+            parallelism jsonb,      -- ParallelismPlan {tp,pp,ep,dp,launch}
+            kv_bytes_per_slot, max_slots,
             pinned bool, loaded_at, last_used_at, lease_epoch
+
+replica_shards: id, replica_id, device_id, rank, role('leader'|'worker'),
+            resident_bytes, status
+            -- Memory is accounted per shard. A replica's footprint is the sum
+            -- of its shards, which may sit on different devices and nodes.
 
 pools:      id, org_id, name, strategy('weighted'|'least-wait'|'cost-aware'|'failover'),
             policy jsonb
@@ -325,7 +340,7 @@ computed differs per device kind, and each computation lives in its own
 ```
 total        = nvmlDeviceGetMemoryInfo().total
 used_total   = nvmlDeviceGetMemoryInfo().used
-managed      = Σ resident_bytes of our replicas on this device
+managed      = Σ resident_bytes of our shards on this device
 foreign      = max(0, used_total − managed)      // other people's processes
 headroom     = max(HEADROOM_MIN, total × HEADROOM_FRAC)
 available    = total − foreign − managed − headroom
@@ -346,7 +361,7 @@ There is no such thing as "free VRAM."
 physmem      = sysctl hw.memsize
 wired_limit  = sysctl iogpu.wired_limit_mb × MiB, or default ≈ 0.75 × physmem
 os_reserve   = max(OS_RESERVE_MIN, physmem × OS_RESERVE_FRAC)   // 8 GiB / 0.15
-managed      = Σ resident_bytes of our replicas
+managed      = Σ resident_bytes of our shards
 foreign_gpu  = Metal currentAllocatedSize − managed
 mem_pressure = vm_stat-derived pressure level (normal|warn|critical)
 
@@ -391,11 +406,14 @@ footprint(concurrency c) = weights_bytes + runtime_overhead
 ```
 
 `ModelProfile` stores both `estimated` and `measured` variants of every term.
-After the first successful load on a given `(device_kind, runtime_kind)` pair,
-the agent reports actual resident bytes and the profile is updated; subsequent
-placements use the measured value. Profiles are keyed by
-`(model, quantization, runtime_kind, device_kind)` because an MLX load and a
-vLLM load of the same weights genuinely differ.
+After the first successful load, the agent reports actual resident bytes per
+shard and the profile is updated; subsequent placements use the measured value.
+Profiles are keyed by
+`(model, quantization, runtime_kind, device_kind, parallelism_signature)`
+because an MLX load and a vLLM load of the same weights genuinely differ — and
+because a TP=2 load is a different measurement from a TP=4 load. Estimating one
+degree from another is how you get an OOM thirty seconds into a ninety-second
+distributed load.
 
 `max_slots` — the concurrency a replica can accept — falls directly out of this:
 
@@ -406,7 +424,30 @@ max_slots = clamp(floor((device_available + weights_already_resident − weights
 ```
 
 This single number connects memory accounting to queueing (§6.5), which is what
-makes "predicted wait" a real measurement rather than a guess.
+makes "predicted wait" a real measurement rather than a guess. For a sharded
+replica it is computed from the *most constrained* shard — a pipeline stage on
+a smaller GPU caps the concurrency of the whole deployment.
+
+#### Sharded footprints
+
+When a replica spans a DeviceSet, the scheduler must know what each shard costs,
+because feasibility is checked per device. The division depends on the
+parallelism strategy, and the three differ enough that one formula will not do:
+
+| Strategy | Weights per shard | KV cache per shard | Interconnect sensitivity |
+|---|---|---|---|
+| **Tensor (TP=N)** | ≈ `weights / N`, plus replicated terms (embeddings, norms) | ≈ `kv / N` — attention heads are split | **Severe.** An all-reduce on every layer. Wants NVLink or same-node PCIe; over ordinary Ethernet it is routinely *slower* than not sharding at all. |
+| **Pipeline (PP=N)** | ≈ `weights / N`, split by layer — rarely even, since layers differ in size | Only the stage's own layers | **Mild.** Point-to-point activations at stage boundaries. Tolerates cross-node links. |
+| **Expert (EP=N)** | Dense params replicated + `experts / N` | Replicated — EP does not shard attention | **Moderate.** All-to-all on MoE layers: bandwidth-hungry, but burstier than TP. |
+
+Two rules the placer enforces, derived directly from that last column:
+
+1. **TP does not cross a node boundary** unless the link between those nodes has
+   been *measured* above a configured floor, or the user explicitly overrides.
+   The default is same-node only.
+2. **Cross-node spans prefer pipeline parallelism.** When no single node can
+   hold the model, the planner reaches for the standard shape: tensor
+   parallelism *within* each node, pipeline parallelism *across* them.
 
 ### 5.4 Sites and locality
 
@@ -414,17 +455,42 @@ Each node self-reports a `site_id`: a stable hash of its outbound public IP plus
 its private subnet, refined by successful peer connectivity probes. Two nodes on
 the same LAN converge on the same site.
 
-Sites matter for exactly two things, and it is worth being clear that they
-matter for *only* these two:
+Sites matter for exactly three things:
 
 1. **Data-plane routing.** Same-site edges are eligible for direct peer
    streaming; cross-site edges relay.
 2. **Placement affinity.** The scorer prefers to co-locate adjacent steps in a
    flow, because a fan-out whose four branches all land on one site keeps every
    intermediate on the LAN.
+3. **Multi-node deployment feasibility.** A replica may span nodes only within
+   a single site, and only over links that clear its parallelism strategy's
+   bandwidth floor (§5.5).
 
-Sites are never a correctness boundary. A flow whose steps scatter across three
-sites produces exactly the same answer, more slowly.
+For flows, sites are never a correctness boundary: a flow whose steps scatter
+across three sites produces exactly the same answer, more slowly. For
+multi-node replicas they *are* a hard constraint — a tensor-parallel deployment
+cannot be stretched across the public internet and remain useful.
+
+### 5.5 Interconnect topology
+
+Multi-device placement is only as good as its knowledge of the links between
+devices, so the agent reports and the scheduler stores a per-node interconnect
+graph.
+
+- **Intra-node:** NVLink / NVSwitch presence and peer groups (NVML
+  `nvmlDeviceGetTopologyCommonAncestor` plus P2P capability checks), PCIe
+  generation and lane width, NUMA affinity. Apple nodes are single-GPU, so
+  intra-node parallelism does not arise there.
+- **Inter-node:** **measured, never assumed.** Agents in the same site
+  periodically run a short bandwidth-and-latency probe against their peers,
+  piggy-backed on the data-plane connection they already hold, and report an
+  EWMA. It is cheap, it is honest, and it catches the machine that is
+  nominally on the LAN but actually on Wi-Fi.
+
+Links are classified into tiers — `nvlink`, `pcie`, `lan-fast` (≥10 GbE), `lan`
+(1 GbE), `wan` — and each parallelism strategy declares the minimum tier it will
+accept. This is what turns "don't run tensor parallelism over Wi-Fi" from
+folklore into a scheduler constraint.
 
 ---
 
@@ -447,7 +513,17 @@ implementations from the start, so the seams are real:
 ```ts
 interface PlacementStrategy {
   name: string;
-  score(candidate: DeviceCandidate, ctx: PlacementContext): ScoreBreakdown;
+  /** Enumerate candidate DeviceSets — one device, several on one node, or
+   *  several across nodes in one site — that could host this model. */
+  propose(m: ModelSpec, fleet: FleetState, ctx: PlacementContext): DeviceSetCandidate[];
+  score(candidate: DeviceSetCandidate, ctx: PlacementContext): ScoreBreakdown;
+}
+
+/** Chooses HOW a model is split across a DeviceSet. Returns null when the
+ *  runtime cannot serve this model on this shape at all. */
+interface ParallelismPlanner {
+  name: string;
+  plan(m: ModelSpec, set: DeviceSetCandidate, rt: RuntimeCapabilities): ParallelismPlan | null;
 }
 
 interface RoutingStrategy {
@@ -457,12 +533,17 @@ interface RoutingStrategy {
 
 interface EvictionPolicy {
   name: string;
+  /** Returns whole replicas. Evicting a sharded replica frees memory on every
+   *  device it occupies — eviction is never partial. */
   choose(device: DeviceState, need: number, ctx: EvictionContext): Replica[];
 }
 ```
 
 Shipped implementations: placement — `balanced` (default) and `pack`
-(consolidate onto fewest devices, useful for leaving a machine free); routing —
+(consolidate onto fewest devices, useful for leaving a machine free);
+parallelism — `single` (tp=1, the default and the only one needed for models
+that fit on one device), `tp-within-node`, and `tp-in-pp-across` (tensor
+parallelism inside each node, pipeline parallelism between them); routing —
 `weighted`, `least-wait`, `cost-aware`, `failover`; eviction — `lru-cost-aware`
 (default) and `strict-lru`.
 
@@ -472,20 +553,30 @@ must require touching exactly one file plus a registry entry.
 ### 6.2 Placement scoring
 
 Placement answers: *given that we need a replica of Model M and none suitable
-exists, on which device should it be created?*
+exists, on which **set** of devices should it be created, and under which
+parallelism plan?*
 
 ```
-candidates = devices
-  |> filter(feasible)          # constraints satisfiable and memory fits,
-                               # possibly after eviction
+candidates = enumerateDeviceSets(model, fleet)   # 1 device → N on one node
+  |> map(set => [set, parallelismPlanner.plan(model, set, runtimeCaps)])
+  |> filter(plan != null)      # runtime can actually serve this shape
+  |> filter(feasible)          # every shard fits its device, possibly after
+                               # eviction; link tier clears the plan's floor
   |> map(score)
   |> maxBy(total)
 ```
 
-Feasibility is hard filtering: device kind supported by the runtime, required
-capabilities present, org/node/device constraints from the pool and the flow
-node, node not draining, memory pressure acceptable, and
-`available + evictable ≥ footprint(1)`.
+Enumeration is bounded, not exhaustive: single devices first, then same-node
+groups at power-of-two sizes (TP degrees essentially always are), and cross-node
+groups only when no single node can hold the model at all. A twenty-device fleet
+yields tens of candidates, not millions.
+
+Feasibility is hard filtering, applied per shard *and* per set: device kind
+supported by the runtime, required capabilities present, org/node/device
+constraints from the pool and the flow node, no node in the set draining,
+memory pressure acceptable on **every** device, `available + evictable ≥
+shard_footprint` for **every** shard, and the set's weakest link at or above the
+parallelism plan's declared tier floor (§5.5).
 
 Scoring is a weighted sum over normalized [0,1] terms:
 
@@ -498,11 +589,27 @@ Scoring is a weighted sum over normalized [0,1] terms:
 | `locality` | Same site (and same node) as the upstream step | 0.10 |
 | `evictionCost` | Negative: value of what must be evicted, weighted by reload time | −0.20 |
 | `interactive` | Negative: penalty for a machine flagged as someone's daily driver | −0.10 |
+| `parallelismCost` | Negative: collective-communication overhead on the critical path, scaled by the set's weakest link tier | −0.15 |
+| `setWidth` | Negative: mild per-extra-device penalty, so a model that fits on one GPU is not needlessly spread across three | −0.08 |
 
 Weights are org-configurable and expressible as a named profile
-("latency-first", "consolidate", "keep-my-laptop-free"). The full
-`ScoreBreakdown` for the winner **and every rejected candidate** is persisted
-to `placement_decisions`. That record is the UI's explanation and the test
+("latency-first", "consolidate", "keep-my-laptop-free").
+
+**Gang scheduling.** A multi-device replica is all-or-nothing: either every
+shard is admitted or none is. The placer reserves memory on every device in the
+set inside a single Postgres transaction before any load begins, and releases
+the whole reservation if any shard fails. Two guards against the classic
+distributed-scheduling failure where two half-allocated deployments deadlock
+each other:
+
+- **Reservations are acquired in a global device order**, so concurrent
+  placements take locks in the same sequence and cannot wait circularly.
+- **Reservations expire.** One that has not become a running shard within its
+  TTL is released, and the placement attempt fails cleanly instead of holding
+  memory hostage.
+
+The full `ScoreBreakdown` for the winner **and every rejected candidate** is
+persisted to `placement_decisions`. That record is the UI's explanation and the test
 suite's fixture.
 
 ### 6.3 Lifecycle: load, warm, evict
@@ -541,6 +648,18 @@ Loading is a BullMQ job with progress events (pull → verify → load → warm 
 ready), streamed to the UI. First-token warmup after load is explicit: we send
 a tiny synthetic prompt so that `ready` means *actually ready*, not "the
 process started."
+
+A distributed load adds a rendezvous. The control plane designates rank 0 as
+leader and sends every participating agent the same plan plus its own rank; the
+leader starts the runtime's distributed launcher (for vLLM, its Ray-based
+multi-node path) and the workers join. The replica reaches `ready` only when the
+leader reports the whole group serving. The rendezvous window is generous but
+finite: a worker that fails to join in time aborts the entire load and releases
+every reservation.
+
+Eviction of a sharded replica is likewise atomic — all shards drain and release
+together, and the freed memory on every device becomes available in one step.
+Partially-evicted is not a state this system can be in.
 
 ### 6.4 Queueing and predicted wait
 
@@ -605,6 +724,13 @@ Scenarios that must exist on day one:
   surviving device and a correct partial-failure policy.
 - Fan-out locality: 4 branches, 2 sites → assert branches co-locate to minimize
   cross-site edges.
+- Gang scheduling: two 4-GPU placements race for six free GPUs → assert ordered
+  reservations, one winner, no deadlock, loser fails cleanly.
+- Link-tier refusal: a model needing TP=2 with only a 1 GbE link between
+  candidate nodes → assert the cross-node set is rejected and a slower
+  single-node placement (or an honest failure) is chosen instead.
+- Shard loss: one worker of a TP=4 replica dies → assert the whole replica tears
+  down and re-places, with no half-alive deployment left behind.
 
 Every scheduler bug found in production becomes a new simulator scenario before
 it is fixed.
@@ -645,12 +771,38 @@ type DeviceProbe interface {
 type RuntimeAdapter interface {
     Kind() string
     Detect(ctx context.Context) ([]RuntimeInstance, error)
-    Supports(m ModelSpec, d Device) bool
+
+    // Capabilities declares which parallelism strategies and degrees this
+    // runtime supports, and whether it can span nodes at all. The scheduler
+    // never proposes a plan a runtime has not claimed.
+    Capabilities() RuntimeCapabilities
+
+    Supports(m ModelSpec, set DeviceSet, p ParallelismPlan) bool
     Pull(ctx context.Context, m ModelSpec, progress chan<- Progress) error
-    Load(ctx context.Context, m ModelSpec, d Device, opts LoadOpts) (Replica, error)
-    Unload(ctx context.Context, r Replica) error
-    Infer(ctx context.Context, r Replica, req InferRequest) (TokenStream, error)
-    Stats(ctx context.Context, r Replica) (ReplicaStats, error)
+
+    // Load participates in a possibly-distributed load. Rank 0 is the leader
+    // and starts the runtime's own launcher; other ranks join the rendezvous.
+    Load(ctx context.Context, req LoadRequest) (ShardHandle, error)
+
+    Unload(ctx context.Context, h ShardHandle) error
+    Infer(ctx context.Context, h ShardHandle, req InferRequest) (TokenStream, error)
+    Stats(ctx context.Context, h ShardHandle) (ShardStats, error)
+}
+
+type RuntimeCapabilities struct {
+    TP, PP, EP   DegreeSupport          // supported degrees, e.g. {1,2,4,8}
+    MultiNode    bool
+    MinLinkTier  map[Strategy]LinkTier  // refuse to plan below this
+    LauncherKind string                 // "none" | "ray" | "mpi" | "native"
+}
+
+type LoadRequest struct {
+    Model      ModelSpec
+    Set        DeviceSet       // the whole set, so every rank sees the topology
+    Rank       int
+    Plan       ParallelismPlan
+    Rendezvous RendezvousInfo  // leader address, token, deadline
+    Opts       LoadOpts
 }
 ```
 
@@ -659,6 +811,13 @@ lifecycle control rather than left to Ollama's own timer), **llama.cpp server**,
 **vLLM** (OpenAI-compatible; managed as a child process with explicit
 `--gpu-memory-utilization`), **MLX** (`mlx_lm.server`, Apple only), and
 **LM Studio** (discovery + inference only; its own UI owns loading).
+
+Parallelism support is per-adapter and **declared, never assumed**. vLLM
+supports TP and PP and can span nodes through its Ray launcher; llama.cpp can
+split layers across machines with its RPC backend, a PP-like shape deferred past
+v1; Ollama, MLX, and LM Studio are single-device in v1. Because the scheduler
+reads `Capabilities()` and proposes nothing a runtime has not claimed, teaching
+an adapter multi-node support later requires no scheduler change at all.
 
 Two orthogonal modes, supported by every adapter:
 
@@ -1020,7 +1179,9 @@ see why something was slow cannot fix it.
 
 Each node is a card: device bars showing `managed` / `foreign` / `free` memory
 as distinct segments (the distinction matters and users understand it
-immediately when shown), resident replicas with pin controls, live
+immediately when shown), resident shards with pin controls — a replica spanning
+several devices renders as one object bridging their bars, labeled with its
+parallelism plan — live
 utilization sparklines, and the node's own caps and availability window.
 
 Fleet-level affordances: drain a node, pause the fleet, pin a model, add
@@ -1115,6 +1276,9 @@ of instruction.
 |---|---|
 | Node goes offline mid-step | Lease invalidated; step retried per policy on another replica; if none feasible, step fails and `gather` partial-failure policy applies. |
 | Node offline mid-fan-out | Only the affected branches retry; siblings continue. |
+| Node hosting one shard of a sharded replica goes offline | The whole replica is marked `failed` and every shard torn down; in-flight steps retry elsewhere per policy. A half-alive distributed deployment is never kept. |
+| Rendezvous times out during a distributed load | Load aborts, reservations released on every device, placement retried with the unresponsive node excluded. |
+| Inter-node link degrades below the plan's tier floor | Replica marked `degraded`; no new leases routed to it; drained and re-placed once in-flight work finishes. |
 | Control plane restarts mid-run | Runs resume at step boundaries from the outbox. In-flight streaming steps are marked `interrupted` and retried. |
 | Runtime process crashes | Agent detects, marks replica `failed`, reports, and restarts it if the load was managed. Scheduler re-places. |
 | Device OOM | Replica marked `failed`; footprint profile corrected upward with the observed value; device headroom increased adaptively; placement retried elsewhere. |
@@ -1185,7 +1349,7 @@ for one version so a rollback never strands the database.
 
 ## 16. Build order
 
-The whole architecture is specified above; it is built in nine slices. Each
+The whole architecture is specified above; it is built in ten slices. Each
 slice ends at something demonstrable, and each becomes its own implementation
 plan. Slices 1–3 are the spine — nothing later is meaningful without them.
 
@@ -1193,16 +1357,24 @@ plan. Slices 1–3 are the spine — nothing later is meaningful without them.
 |---|---|---|
 | **1** | **Foundations** — monorepo, Buf/proto, control-plane skeleton, auth + orgs, agent enrollment, heartbeat, device inventory, Fleet page | …install the agent on the Mac and the 4090 box and see both machines, with correct memory numbers, in a browser. |
 | **2** | **Runtimes and manual placement** — `RuntimeAdapter` (Ollama first), model catalog, explicit load/unload, single-pool OpenAI-compatible endpoint, relay transport | …load a model onto a chosen device from the UI and get a real streaming completion through your own API. |
-| **3** | **Scheduler core** — accounting, feasibility, scorer, queue/predicted-wait, admission, **simulator first**, placement explanations | …stop choosing devices by hand, and see exactly why the scheduler chose what it chose. |
+| **3** | **Scheduler core** — accounting, feasibility, scorer, queue/predicted-wait, admission, **simulator first**, placement explanations; DeviceSet-shaped interfaces with single-device enumeration | …stop choosing devices by hand, and see exactly why the scheduler chose what it chose. |
 | **4** | **Lifecycle** — autoload, cost-aware eviction with hysteresis, pins and reservations, predictive warming, contention detection | …leave it alone and have models load, evict, and stay warm sensibly under changing demand. |
-| **5** | **Flow engine** — flow schema, compiler, executor, `run_steps` + outbox, native SSE API, linear → fan-out → dynamic `map`/`gather`/`reduce` | …run the motivating example: Opus 5 splits a task, four local models work in parallel across two machines, results reduce into one answer. |
-| **6** | **Canvas** — React Flow editor, Level 1 simple mode, Level 2 advanced policies, the builder→expression escape hatch, publish flow, live validation | …build and publish that flow by drawing it, without writing JSON. |
-| **7** | **Observability** — TimescaleDB telemetry, dashboards, run traces, cost model (energy + API), contention view | …answer "what is slow, what is expensive, and what is fighting over the 4090?" |
-| **8** | **Direct data plane** — peer mTLS server, signed grants, site detection, transport negotiation, direct-to-client streaming | …keep LAN traffic on the LAN, with automatic relay fallback. |
-| **9** | **Hardening** — quotas, rate limits, RLS audit, fleet self-update with cohorts, additional adapters (vLLM, MLX, llama.cpp, LM Studio), billing hooks | …hand it to someone who is not you. |
+| **5** | **Distributed deployments** — interconnect probing and link tiers, DeviceSet enumeration, `ParallelismPlanner`, gang scheduling with ordered expiring reservations, rendezvous + atomic eviction, vLLM TP within a node then PP across nodes | …serve a model too large for any single GPU by having the scheduler pick the devices and the parallelism strategy for you. |
+| **6** | **Flow engine** — flow schema, compiler, executor, `run_steps` + outbox, native SSE API, linear → fan-out → dynamic `map`/`gather`/`reduce` | …run the motivating example: Opus 5 splits a task, four local models work in parallel across two machines, results reduce into one answer. |
+| **7** | **Canvas** — React Flow editor, Level 1 simple mode, Level 2 advanced policies, the builder→expression escape hatch, publish flow, live validation | …build and publish that flow by drawing it, without writing JSON. |
+| **8** | **Observability** — TimescaleDB telemetry, dashboards, run traces, cost model (energy + API), contention view | …answer "what is slow, what is expensive, and what is fighting over the 4090?" |
+| **9** | **Direct data plane** — peer mTLS server, signed grants, site detection, transport negotiation, direct-to-client streaming | …keep LAN traffic on the LAN, with automatic relay fallback. |
+| **10** | **Hardening** — quotas, rate limits, RLS audit, fleet self-update with cohorts, remaining adapters (MLX, llama.cpp, LM Studio), billing hooks | …hand it to someone who is not you. |
 
-Slices 5 and 6 may proceed in parallel with 4 once 3 is stable; 8 and 9 are
-independent of each other.
+Slices 6 and 7 may proceed in parallel with 4 and 5 once 3 is stable; 9 and 10
+are independent of each other.
+
+One sequencing note that is easy to get wrong: slice 3 ships with the
+DeviceSet-shaped interfaces of §6.1 already in place, but with enumeration
+limited to single devices. Slice 5 then widens the enumerator and adds the
+planner — it does not rewrite the scheduler. Building slice 3 against a
+single-`Device` interface and generalizing later would mean touching every
+strategy, every test fixture, and every persisted `placement_decision`.
 
 ---
 
@@ -1219,14 +1391,24 @@ Deliberately unresolved, to be decided with evidence rather than guessed now:
    footprint model needs per-architecture handling rather than one formula.
 3. **Pools as an explicit first-class UI object.** The domain model has them
    from the start. Whether users see a "Pools" tab in v1 or only see pools
-   implicitly through model nodes is a UX call best made against slice 6's
+   implicitly through model nodes is a UX call best made against slice 7's
    first real users.
 4. **`gather` semantics for streaming reducers.** Buffering the whole branch
    output before reducing is simple and correct; streaming reduction is better
    for latency. Start buffered; revisit with real traces.
 5. **Cross-org shared capacity.** Explicitly out of scope, but it is the
    obvious future ask ("let my friend's box join my fleet"). Nothing in this
-   design should make it impossible — worth a check at the end of slice 9.
+   design should make it impossible — worth a check at the end of slice 10.
 6. **Windows support depth.** The agent targets Windows, but NVML behavior,
    service installation, and WSL interactions are least understood. Treat
-   Windows as best-effort until slice 9.
+   Windows as best-effort until slice 10.
+7. **Choosing the parallelism degree.** The planner will pick TP=2 vs. TP=4
+   from footprint and link tier. Whether that heuristic beats simply measuring
+   — load each viable degree once, keep the fastest, cache the result per
+   `(model, device kind)` — is genuinely unknown. Measurement costs minutes of
+   one-time work per model and may just be better. Decide with data in slice 5,
+   not now.
+8. **Apple Silicon distributed inference.** MLX has a distributed backend, but
+   whether multi-Mac serving over Thunderbolt or 10 GbE is worth orchestrating
+   is unproven. Apple nodes are single-device in v1; revisit if the fleet makes
+   it worth measuring.
