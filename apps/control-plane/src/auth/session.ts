@@ -1,4 +1,4 @@
-import { auth } from "./auth.js";
+import { auth, ensurePersonalOrganization } from "./auth.js";
 
 export interface SessionContext {
   userId: string;
@@ -41,6 +41,32 @@ export async function requireSession(req: HeaderSource): Promise<SessionContext>
     const orgs = await auth.api.listOrganizations({ headers });
     orgId = orgs[0]?.id ?? null;
   }
+
+  if (!orgId) {
+    // Self-heal: the sign-up hook (auth.ts) that normally creates this
+    // user's organization runs after the sign-up transaction commits and is
+    // deliberately non-fatal, so a transient DB error or slug collision can
+    // leave a real, already-committed user with no organization. Fix it
+    // here, at the point the invariant actually matters -- a user with no
+    // org can't do anything regardless -- rather than leaving them
+    // permanently locked out behind a 403 with no recovery path.
+    console.warn(
+      "[auth] session has no organization; creating one now (self-heal)",
+      { userId: session.user.id, email: session.user.email },
+    );
+    try {
+      const org = await ensurePersonalOrganization(session.user);
+      orgId = org?.id ?? null;
+    } catch (err) {
+      console.error("[auth] self-heal organization creation failed", {
+        userId: session.user.id,
+        email: session.user.email,
+        err,
+      });
+      orgId = null;
+    }
+  }
+
   if (!orgId) throw new HttpError(403, "no_organization", "user has no organization");
 
   return { userId: session.user.id, orgId };
