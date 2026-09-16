@@ -10,6 +10,7 @@ const Schema = z.object({
   NODE_AUTH_SKEW_MS: z.coerce.number().default(60_000),
   SAMPLE_INTERVAL_MS: z.coerce.number().default(5_000),
   PAIRING_CODE_TTL_MS: z.coerce.number().default(15 * 60_000),
+  PAIRING_CODE_PEPPER: z.string().min(32),
 });
 
 // Fail at boot with a readable message rather than at the first request

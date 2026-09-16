@@ -1,4 +1,4 @@
-import { createHash, randomInt } from "node:crypto";
+import { createHmac, randomInt } from "node:crypto";
 import { and, eq, isNull } from "drizzle-orm";
 import { ownerDb, pairingCodes, withOrg } from "@modelhub/db";
 import { env } from "../env.js";
@@ -16,9 +16,16 @@ function generateCode(): string {
   return `${pick()}-${pick()}`;
 }
 
-/** Codes are short-lived and single-use, so a plain SHA-256 is the right tool. */
+/**
+ * Keyed with PAIRING_CODE_PEPPER (an application secret, never stored in the
+ * database) so that an attacker who obtains only pairing_codes.code_hash —
+ * a backup, a read-only injection scoped to that table, an insider — cannot
+ * brute-force the ~40-bit codespace offline without also holding the pepper.
+ * A plain SHA-256 would not provide that: at this codespace size it's cheap
+ * enough to exhaust well within the code's TTL.
+ */
 export function hashCode(code: string): string {
-  return createHash("sha256").update(normalize(code)).digest("hex");
+  return createHmac("sha256", env.PAIRING_CODE_PEPPER).update(normalize(code)).digest("hex");
 }
 
 export function normalize(code: string): string {

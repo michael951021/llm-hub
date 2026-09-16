@@ -1,8 +1,8 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { ownerDb, organization, pairingCodes } from "@modelhub/db";
 import { eq } from "drizzle-orm";
-import { mintPairingCode, redeemPairingCode, PairingCodeError } from "./pairing.js";
+import { mintPairingCode, redeemPairingCode, PairingCodeError, hashCode, normalize } from "./pairing.js";
 
 const orgId = `org_${randomUUID().slice(0, 8)}`;
 const userId = `user_${randomUUID().slice(0, 8)}`;
@@ -58,5 +58,11 @@ describe("pairing codes", () => {
     const mangled = code.toLowerCase().replace("-", "");
     const result = await redeemPairingCode(mangled);
     expect(result.orgId).toBe(orgId);
+  });
+
+  it("hashes with a keyed pepper, not a bare SHA-256", async () => {
+    const { code } = await mintPairingCode(orgId, userId, "n5");
+    const plainSha256 = createHash("sha256").update(normalize(code)).digest("hex");
+    expect(hashCode(code)).not.toBe(plainSha256);
   });
 });
