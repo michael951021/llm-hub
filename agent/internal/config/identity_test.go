@@ -135,6 +135,69 @@ func TestKeyringIdentityDeleteIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestKeyringIdentityDeleteStillRemovesFallbackWhenKeychainFails is the
+// regression test for the bug found in review: Delete used to return as
+// soon as keyring.Delete failed for any reason other than ErrNotFound,
+// which meant k.fallback.Delete() never ran. That is exactly the wrong
+// branch to skip it on — LoadOrCreate falls back to the file precisely
+// when the keychain "exists but couldn't be used" (a headless Linux box
+// with no secret-service, or a locked login keyring), so a keychain
+// failure here is often the signal that the file is where the real key
+// actually lives. This proves the fallback file is removed even though
+// the keychain half fails and surfaces an error.
+func TestKeyringIdentityDeleteStillRemovesFallbackWhenKeychainFails(t *testing.T) {
+	keyring.MockInitWithError(errors.New("keychain is locked"))
+	t.Cleanup(keyring.MockInit)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, identityFileName)
+	if err := writeFile(path, []byte("encoded-key-material")); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	err := NewIdentity(dir).Delete()
+	if err == nil {
+		t.Fatal("expected an error surfacing the keychain failure")
+	}
+	if !strings.Contains(err.Error(), "locked") {
+		t.Errorf("error does not mention the keychain failure: %v", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("expected the fallback identity file to be removed despite the keychain delete failing; stat err = %v", statErr)
+	}
+}
+
+// TestKeyringIdentityDeleteWrapsBothErrorsOnDoubleFailure is Delete's
+// analogue of TestKeyringIdentityWrapsBothErrorsOnDoubleFailure below: when
+// both the keychain removal and the fallback file removal fail, the
+// returned error must mention the keychain failure rather than reporting
+// only the (usually less actionable) file error.
+func TestKeyringIdentityDeleteWrapsBothErrorsOnDoubleFailure(t *testing.T) {
+	keyring.MockInitWithError(errors.New("keychain is locked"))
+	t.Cleanup(keyring.MockInit)
+
+	dir := t.TempDir()
+	// Make the fallback file un-removable: put a non-empty directory where
+	// the identity file would be, so os.Remove fails (a non-empty
+	// directory can't be removed) instead of silently succeeding or
+	// no-opping as "already gone".
+	path := filepath.Join(dir, identityFileName)
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "occupied"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	err := NewIdentity(dir).Delete()
+	if err == nil {
+		t.Fatal("expected an error when both the keychain and the fallback file removal fail")
+	}
+	if !strings.Contains(err.Error(), "locked") {
+		t.Errorf("error does not mention the keychain failure: %v", err)
+	}
+}
+
 // TestKeyringIdentityWrapsBothErrorsOnDoubleFailure guards against silently
 // discarding the keychain error when both the keychain and the fallback
 // file fail: a user whose keychain is locked needs to see that, not just a

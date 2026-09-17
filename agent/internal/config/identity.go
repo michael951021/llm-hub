@@ -80,7 +80,10 @@ func NewIdentity(dir string) Identity {
 // keyringAccount derives a stable keychain account name from a config
 // directory. It hashes the resolved absolute path rather than using the
 // path itself because some keychain backends (and `security` on the
-// command line) are awkward with account names containing slashes.
+// command line) are awkward with account names containing slashes. The
+// truncated SHA-256 is a uniqueness hash for namespacing distinct config
+// dirs apart, not a security boundary — nothing sensitive is derived from
+// or protected by it.
 func keyringAccount(dir string) string {
 	resolved := dir
 	if abs, err := filepath.Abs(dir); err == nil {
@@ -120,13 +123,25 @@ func (k *keyringIdentity) LoadOrCreate() (ed25519.PrivateKey, error) {
 
 // Delete removes both the keychain entry and the file fallback, so an
 // uninstall genuinely leaves no key material behind regardless of which
-// backend LoadOrCreate happened to use.
+// backend LoadOrCreate happened to use. The two are attempted
+// unconditionally and independently of one another — LoadOrCreate falls
+// back to the file precisely when the keychain "exists but couldn't be
+// used" (e.g. a headless Linux box with no secret-service, or a locked
+// login keyring), which is exactly the situation where the file, not the
+// keychain, holds the real key. Returning early after a keychain error
+// would skip the fallback delete in precisely that case.
 func (k *keyringIdentity) Delete() error {
-	err := keyring.Delete(keyringService, k.account)
-	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
-		return fmt.Errorf("could not remove keychain entry: %w", err)
+	kErr := keyring.Delete(keyringService, k.account)
+	if errors.Is(kErr, keyring.ErrNotFound) {
+		kErr = nil
 	}
-	if fbErr := k.fallback.Delete(); fbErr != nil {
+	fbErr := k.fallback.Delete()
+	switch {
+	case kErr != nil && fbErr != nil:
+		return fmt.Errorf("could not remove keychain entry (%w), and could not remove the fallback identity file: %w", kErr, fbErr)
+	case kErr != nil:
+		return fmt.Errorf("could not remove keychain entry: %w", kErr)
+	case fbErr != nil:
 		return fmt.Errorf("could not remove fallback identity file: %w", fbErr)
 	}
 	return nil
