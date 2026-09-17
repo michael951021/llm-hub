@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	connectrpc.com/connect v1.17.0
 	github.com/NVIDIA/go-nvml v0.13.4-0
+	github.com/kardianos/service v1.3.0
 	github.com/shirou/gopsutil/v4 v4.26.8
 	github.com/spf13/cobra v1.8.1
 	github.com/zalando/go-keyring v0.2.5

@@ -1,0 +1,38 @@
+version: 2
+project_name: modelhub-agent
+
+builds:
+  - id: agent
+    main: ./cmd/agent
+    binary: modelhub-agent
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/modelhub/agent/internal/version.Version={{.Version}}
+
+  # NVML needs cgo and the driver headers, so the CUDA build is Linux-only and
+  # produced on a runner that has them.
+  - id: agent-cuda
+    main: ./cmd/agent
+    binary: modelhub-agent
+    env: [CGO_ENABLED=1]
+    goos: [linux]
+    goarch: [amd64]
+    tags: [nvml]
+    ldflags:
+      - -s -w -X github.com/modelhub/agent/internal/version.Version={{.Version}}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if eq .ID \"agent-cuda\" }}_cuda{{ end }}"
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"

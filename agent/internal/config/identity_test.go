@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,83 @@ func TestFileIdentityRejectsCorruptKeyMaterial(t *testing.T) {
 	}
 	if _, err := NewFileIdentity(dir).LoadOrCreate(); err == nil {
 		t.Fatal("expected an error for corrupt key material, got nil")
+	}
+}
+
+// TestKeyringAccountDiffersByConfigDir is the regression test for the bug
+// fixed in Task 19: NewIdentity used to key every keychain entry off a
+// fixed account name regardless of dir, so a fresh enroll after uninstall
+// (or two agent instances with different config dirs) silently reused the
+// same stored key. The account must now be derived from the resolved
+// config directory.
+func TestKeyringAccountDiffersByConfigDir(t *testing.T) {
+	a := keyringAccount(filepath.Join(t.TempDir(), "one"))
+	b := keyringAccount(filepath.Join(t.TempDir(), "two"))
+	if a == b {
+		t.Fatalf("expected different keyring accounts for different config dirs, both got %q", a)
+	}
+}
+
+// TestKeyringAccountStableForSameConfigDir ensures the account name is
+// deterministic for a given directory (e.g. across process restarts),
+// including when the same logical path is spelled differently.
+func TestKeyringAccountStableForSameConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	a := keyringAccount(dir)
+	b := keyringAccount(dir + string(filepath.Separator))
+	if a != b {
+		t.Fatalf("expected the same keyring account for the same dir, got %q and %q", a, b)
+	}
+}
+
+// TestKeyringIdentityDeleteRemovesBothBackends proves that Delete leaves no
+// key material behind: it removes the keychain entry, and it removes the
+// file-fallback key too (in case the fallback was what actually got used,
+// e.g. because the keychain was briefly unavailable when the key was
+// created). This is what makes `uninstall` honest.
+func TestKeyringIdentityDeleteRemovesBothBackends(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+	id := NewIdentity(dir)
+
+	if _, err := id.LoadOrCreate(); err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+
+	ki := id.(*keyringIdentity)
+	if _, err := keyring.Get(keyringService, ki.account); err != nil {
+		t.Fatalf("expected a keychain entry to exist before Delete, got: %v", err)
+	}
+
+	if err := id.Delete(); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if _, err := keyring.Get(keyringService, ki.account); !errors.Is(err, keyring.ErrNotFound) {
+		t.Fatalf("expected keychain entry to be gone after Delete, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, identityFileName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected no fallback identity file after Delete, stat err = %v", err)
+	}
+}
+
+// TestKeyringIdentityDeleteIsIdempotent ensures a second Delete (e.g. an
+// uninstall run twice) is not an error.
+func TestKeyringIdentityDeleteIsIdempotent(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+	id := NewIdentity(dir)
+	if err := id.Delete(); err != nil {
+		t.Fatalf("Delete on a never-created identity: %v", err)
+	}
+	if _, err := id.LoadOrCreate(); err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	if err := id.Delete(); err != nil {
+		t.Fatalf("first Delete: %v", err)
+	}
+	if err := id.Delete(); err != nil {
+		t.Fatalf("second Delete: %v", err)
 	}
 }
 

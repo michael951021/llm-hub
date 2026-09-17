@@ -3,7 +3,9 @@ package config
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -20,6 +22,10 @@ type Identity interface {
 	// LoadOrCreate returns the stored private key, generating and persisting
 	// one on first use.
 	LoadOrCreate() (ed25519.PrivateKey, error)
+
+	// Delete removes any stored identity, leaving no key material behind.
+	// Calling it when no identity exists is not an error.
+	Delete() error
 }
 
 type fileIdentity struct{ dir string }
@@ -47,6 +53,14 @@ func (f *fileIdentity) LoadOrCreate() (ed25519.PrivateKey, error) {
 	}
 }
 
+func (f *fileIdentity) Delete() error {
+	err := os.Remove(filepath.Join(f.dir, identityFileName))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 type keyringIdentity struct {
 	account  string
 	fallback Identity
@@ -54,8 +68,26 @@ type keyringIdentity struct {
 
 // NewIdentity prefers the OS keychain and falls back to a 0600 file when no
 // keychain is available — a headless Linux box, or a locked login keyring.
+//
+// The keychain account is scoped by dir (see keyringAccount) so that two
+// config directories on the same machine — a fresh identity after
+// uninstall/re-enroll, or two independent agent instances — never collide
+// on a single keychain entry.
 func NewIdentity(dir string) Identity {
-	return &keyringIdentity{account: "node-key", fallback: NewFileIdentity(dir)}
+	return &keyringIdentity{account: keyringAccount(dir), fallback: NewFileIdentity(dir)}
+}
+
+// keyringAccount derives a stable keychain account name from a config
+// directory. It hashes the resolved absolute path rather than using the
+// path itself because some keychain backends (and `security` on the
+// command line) are awkward with account names containing slashes.
+func keyringAccount(dir string) string {
+	resolved := dir
+	if abs, err := filepath.Abs(dir); err == nil {
+		resolved = abs
+	}
+	sum := sha256.Sum256([]byte(resolved))
+	return "node-key-" + hex.EncodeToString(sum[:8])
 }
 
 func (k *keyringIdentity) LoadOrCreate() (ed25519.PrivateKey, error) {
@@ -84,6 +116,20 @@ func (k *keyringIdentity) LoadOrCreate() (ed25519.PrivateKey, error) {
 		return k.fallback.LoadOrCreate()
 	}
 	return priv, nil
+}
+
+// Delete removes both the keychain entry and the file fallback, so an
+// uninstall genuinely leaves no key material behind regardless of which
+// backend LoadOrCreate happened to use.
+func (k *keyringIdentity) Delete() error {
+	err := keyring.Delete(keyringService, k.account)
+	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		return fmt.Errorf("could not remove keychain entry: %w", err)
+	}
+	if fbErr := k.fallback.Delete(); fbErr != nil {
+		return fmt.Errorf("could not remove fallback identity file: %w", fbErr)
+	}
+	return nil
 }
 
 func decodeKey(encoded string) (ed25519.PrivateKey, error) {
