@@ -224,13 +224,22 @@ func kindProto(k inventory.Kind) modelhubv1.DeviceKind {
 	}
 }
 
+// pressureProto mirrors kindProto: a value this build does not recognise
+// maps to UNSPECIFIED, not to a plausible-looking default. inventory.Pressure
+// is an open string type, so defaulting to NORMAL would hand a free "the
+// machine is fine" to any future probe that forgets to set it — and NORMAL is
+// the one value with consequences, since the UI renders "not accepting work —
+// under memory pressure" off anything at or above WARN. Unknown has to stay
+// representable on the wire for the server to be able to tell the difference.
 func pressureProto(p inventory.Pressure) modelhubv1.MemoryPressure {
 	switch p {
+	case inventory.PressureNormal:
+		return modelhubv1.MemoryPressure_MEMORY_PRESSURE_NORMAL
 	case inventory.PressureWarn:
 		return modelhubv1.MemoryPressure_MEMORY_PRESSURE_WARN
 	case inventory.PressureCritical:
 		return modelhubv1.MemoryPressure_MEMORY_PRESSURE_CRITICAL
 	default:
-		return modelhubv1.MemoryPressure_MEMORY_PRESSURE_NORMAL
+		return modelhubv1.MemoryPressure_MEMORY_PRESSURE_UNSPECIFIED
 	}
 }

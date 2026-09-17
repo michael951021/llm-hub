@@ -125,12 +125,37 @@ const PRESSURE_NAMES: Record<number, string> = {
 export async function recordInventory(
   orgId: string, nodeId: string, reported: Device[],
 ): Promise<void> {
+  // Resolve every kind first, and drop the ones this build does not
+  // recognize. A device whose kind is unknown is NOT recorded as a cpu: the
+  // agent maps an unrecognized kind to DEVICE_KIND_UNSPECIFIED deliberately
+  // (agent/internal/transport/session.go) so that it fails visibly, and
+  // writing "cpu" here would launder that signal at the database boundary
+  // into a row indistinguishable from a real CPU — no query can find it
+  // afterwards and no migration can repair it, because nothing in the row
+  // records that the kind was invented. Dropping is the recoverable
+  // alternative: the device reappears on the next inventory once a control
+  // plane that knows the kind reads it.
+  //
+  // The filter runs once, up front, so a dropped device also stays out of
+  // `keep` below and is not resurrected by the reconcile.
+  const known: { device: Device; kind: string }[] = [];
+  for (const d of reported) {
+    const kind = KIND_NAMES[d.kind];
+    if (kind === undefined) {
+      console.warn("[inventory] skipping a device with an unrecognized kind", {
+        orgId, nodeId, localId: d.localId, kind: d.kind,
+      });
+      continue;
+    }
+    known.push({ device: d, kind });
+  }
+
   await withOrg(orgId, async (tx) => {
-    for (const d of reported) {
+    for (const { device: d, kind } of known) {
       const values = {
         orgId, nodeId,
         localId: d.localId,
-        kind: KIND_NAMES[d.kind] ?? "cpu",
+        kind,
         index: d.index,
         name: d.name,
         totalBytes: d.totalBytes,
@@ -152,7 +177,7 @@ export async function recordInventory(
       });
     }
 
-    const keep = reported.map((d) => d.localId);
+    const keep = known.map(({ device }) => device.localId);
     await tx.delete(devices).where(
       keep.length > 0
         ? and(eq(devices.nodeId, nodeId), notInArray(devices.localId, keep))
@@ -174,11 +199,23 @@ export async function recordSamples(
 ): Promise<void> {
   await withOrg(orgId, async (tx) => {
     for (const s of samples) {
+      // Unlike an unknown device kind, an unknown pressure is recorded as
+      // "normal" rather than dropped: a sample is a transient reading, and
+      // reading unknown as "warn" would take real capacity out of the fleet
+      // on nothing more than version skew between agent and server. It is
+      // still logged — this is a wire-contract mismatch, and silently
+      // calling it "normal" is exactly how it would stay invisible.
+      const pressure = PRESSURE_NAMES[s.pressure];
+      if (pressure === undefined) {
+        console.warn("[samples] unrecognized memory pressure; recording it as normal", {
+          orgId, nodeId, localId: s.localId, pressure: s.pressure,
+        });
+      }
       await tx.update(devices).set({
         lastUsedBytes: s.usedBytes,
         lastManagedBytes: s.managedBytes,
         lastUtilization: s.utilization,
-        lastPressure: PRESSURE_NAMES[s.pressure] ?? "normal",
+        lastPressure: pressure ?? "normal",
         lastSampleAt: new Date(Number(s.sampledAtUnixMs)),
       }).where(and(eq(devices.nodeId, nodeId), eq(devices.localId, s.localId)));
     }

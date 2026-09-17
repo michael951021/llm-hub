@@ -24,6 +24,16 @@ const (
 )
 
 // Device holds facts that do not change while the machine is running.
+//
+// TotalBytes is per device, and devices on the same host may be backed by the
+// same physical memory. On Apple silicon the CPU probe and the Metal probe
+// both report the machine's physical RAM as TotalBytes, so a 16 GiB Mac
+// reports two devices of 16 GiB each and the device totals add up to more
+// than the host has. That is by design, not double counting: the scheduler
+// budgets `cpu` and `metal` independently against the same unified memory,
+// and each budget is correct on its own terms. A consumer must therefore
+// never sum device TotalBytes to derive node capacity — use HostInfo's
+// TotalMemoryBytes for that.
 type Device struct {
 	LocalID           string
 	Kind              Kind

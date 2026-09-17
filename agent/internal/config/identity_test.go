@@ -224,3 +224,64 @@ func TestKeyringIdentityWrapsBothErrorsOnDoubleFailure(t *testing.T) {
 		t.Errorf("error does not mention the keychain failure: %v", err)
 	}
 }
+
+// TestLoadDoesNotCreateAnIdentity is the regression test for the bug found
+// in the final review: `run` used LoadOrCreate, so a node whose key had been
+// deleted (by `uninstall`, which left config.json behind, or by any other
+// loss) silently minted a brand-new keypair and then dialled the control
+// plane with the old NodeID and a public key the server had never seen —
+// failing authentication forever behind jittered backoff. Load must report
+// the absence instead of papering over it, and must leave no key behind.
+func TestLoadDoesNotCreateAnIdentity(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+
+	if _, err := NewIdentity(dir).Load(); !errors.Is(err, ErrNoIdentity) {
+		t.Fatalf("Load on a node with no identity = %v, want ErrNoIdentity", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, identityFileName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Load created an identity file; stat err = %v", err)
+	}
+
+	if _, err := NewFileIdentity(dir).Load(); !errors.Is(err, ErrNoIdentity) {
+		t.Fatalf("file Load on a node with no identity = %v, want ErrNoIdentity", err)
+	}
+}
+
+// TestLoadReturnsTheStoredIdentity pins the other half: once a key exists,
+// Load returns that exact key rather than a replacement.
+func TestLoadReturnsTheStoredIdentity(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+
+	created, err := NewIdentity(dir).LoadOrCreate()
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	loaded, err := NewIdentity(dir).Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !bytes.Equal(created, loaded) {
+		t.Fatal("Load returned a different key than the one that was stored")
+	}
+}
+
+// TestLoadDoesNotClaimAbsenceWhenTheKeychainIsUnusable guards the one
+// dangerous misdiagnosis: callers turn ErrNoIdentity into "re-enroll this
+// node", and a merely locked keychain is not evidence that the key is gone.
+func TestLoadDoesNotClaimAbsenceWhenTheKeychainIsUnusable(t *testing.T) {
+	keyring.MockInitWithError(errors.New("keychain is locked"))
+	t.Cleanup(keyring.MockInit)
+
+	_, err := NewIdentity(t.TempDir()).Load()
+	if err == nil {
+		t.Fatal("expected an error when the keychain cannot be read")
+	}
+	if errors.Is(err, ErrNoIdentity) {
+		t.Fatalf("a locked keychain must not be reported as a missing identity: %v", err)
+	}
+	if !strings.Contains(err.Error(), "locked") {
+		t.Errorf("error does not mention the keychain failure: %v", err)
+	}
+}

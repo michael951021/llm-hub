@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -51,9 +52,20 @@ func newSession(context.Context) (*transport.Session, error) {
 	if !cfg.Enrolled() {
 		return nil, fmt.Errorf("this node is not enrolled; run: modelhub-agent enroll --code XXXX-XXXX --server <url>")
 	}
-	priv, err := config.NewIdentity(dir).LoadOrCreate()
+	// Load, never LoadOrCreate: this node is already enrolled, so the only
+	// key that can authenticate is the one enrollment registered. Minting a
+	// replacement here would dial with the old NodeID and an unknown key,
+	// looping forever on `invalid signature` behind jittered backoff with
+	// nothing indicating the local state is inconsistent.
+	priv, err := config.NewIdentity(dir).Load()
 	if err != nil {
-		return nil, err
+		if errors.Is(err, config.ErrNoIdentity) {
+			return nil, fmt.Errorf(
+				"this node's config says it is enrolled as node %s, but its identity is missing; "+
+					"re-enroll with: modelhub-agent enroll --code XXXX-XXXX --server %s",
+				cfg.NodeID, cfg.ServerURL)
+		}
+		return nil, fmt.Errorf("could not load this node's identity: %w", err)
 	}
 	return &transport.Session{
 		ServerURL:  cfg.ServerURL,
@@ -221,29 +233,38 @@ func newInstallCmd() *cobra.Command {
 	}
 }
 
-// newUninstallCmd stops and removes the system service registration and
-// deletes this node's stored identity — both the OS keychain entry and any
-// file-fallback key — so a subsequent enroll creates a genuinely new
-// identity rather than colliding with the one the server already knows
-// about. It does not remove the installed binary or the rest of the config
-// directory (e.g. config.json); docs/install.md tells the operator to do
-// that by hand, and this command's own output says exactly what it did.
+// newUninstallCmd stops and removes the system service registration, deletes
+// this node's stored identity — both the OS keychain entry and any
+// file-fallback key — and clears the enrollment recorded in config.json, so
+// a subsequent enroll creates a genuinely new identity rather than colliding
+// with the one the server already knows about.
+//
+// The identity and the enrollment have to go together. Removing only the key
+// leaves a config that still claims to be enrolled: `run` would dial with the
+// old NodeID and a key the server has never seen, and `install` would sail
+// past its not-enrolled guard and register a service that can never
+// authenticate. It still does not remove the installed binary or the rest of
+// the config directory; docs/install.md tells the operator to do that by
+// hand, and this command's own output says exactly what it did.
 func newUninstallCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "uninstall",
-		Short: "Stop and remove the agent service, and delete this node's stored identity",
+		Short: "Stop and remove the agent service, and delete this node's stored identity and enrollment",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svcErr := svc.Uninstall(runSession)
 			idErr := config.NewIdentity(config.Dir()).Delete()
+			if idErr == nil {
+				idErr = config.ClearEnrollment(config.Dir())
+			}
 			switch {
 			case svcErr != nil && idErr != nil:
 				return fmt.Errorf("service removal failed (%v), and identity removal also failed: %w", svcErr, idErr)
 			case svcErr != nil:
-				return fmt.Errorf("this node's stored identity was deleted, but service removal failed (it may not have been installed): %w", svcErr)
+				return fmt.Errorf("this node's stored identity and enrollment were removed, but service removal failed (it may not have been installed): %w", svcErr)
 			case idErr != nil:
-				return fmt.Errorf("the service was removed, but this node's stored identity could not be deleted: %w", idErr)
+				return fmt.Errorf("the service was removed, but this node's stored identity could not be fully removed: %w", idErr)
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "removed modelhub-agent service and deleted this node's stored identity")
+			fmt.Fprintln(cmd.OutOrStdout(), "removed modelhub-agent service, deleted this node's stored identity, and cleared its enrollment")
 			return nil
 		},
 	}

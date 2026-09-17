@@ -13,12 +13,20 @@ export function AddNodeDialog() {
   const [code, setCode] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
+  // Minting a code is the only mutating action in the product. Without the
+  // catch, a failed createPairingCode became an unhandled rejection and the
+  // button just slid back to "Generate pairing code" as though nothing had
+  // been asked for. Surfaced the same way fleet.tsx and sign-in.tsx do.
   async function mint() {
     setBusy(true);
+    setError(null);
     try {
       const res = await fleetClient.createPairingCode({ nodeName: name });
       setCode(res.code);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not generate a pairing code");
     } finally {
       setBusy(false);
     }
@@ -49,6 +57,7 @@ export function AddNodeDialog() {
           >
             {busy ? "Generating…" : "Generate pairing code"}
           </button>
+          {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
         </div>
       ) : (
         <div className="mt-3 space-y-3 text-sm">
@@ -64,7 +73,7 @@ export function AddNodeDialog() {
         </div>
       )}
 
-      <button onClick={() => { setOpen(false); setCode(null); }} className="mt-3 text-sm text-slate-600">
+      <button onClick={() => { setOpen(false); setCode(null); setError(null); }} className="mt-3 text-sm text-slate-600">
         Close
       </button>
     </div>

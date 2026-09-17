@@ -6,6 +6,7 @@ import { buildApp } from "../app.js";
 let app: Awaited<ReturnType<typeof buildApp>>;
 let cookie: string;
 let orgId: string;
+let nodeId: string;
 const GiB = 1024 ** 3;
 
 beforeAll(async () => {
@@ -30,6 +31,7 @@ beforeAll(async () => {
     orgId, name: "4090-box", status: "online", platform: "linux", arch: "amd64",
     publicKey: randomBytes(32), lastSeenAt: new Date(),
   }).returning({ id: nodes.id });
+  nodeId = node!.id;
 
   await ownerDb.insert(devices).values({
     orgId, nodeId: node!.id, localId: "cuda:0", kind: "cuda", index: 0,
@@ -56,9 +58,12 @@ async function rpc(method: string, body: unknown, withCookie = true) {
 }
 
 describe("FleetService", () => {
+  // 401 exactly, not merely ">= 400": a 500 thrown inside requireSession
+  // would satisfy a >= 400 assertion, which would let the one test whose
+  // job is proving the guard works pass while the guard is broken.
   it("requires a session", async () => {
     const res = await rpc("ListNodes", {}, false);
-    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it("returns nodes with budgets already computed", async () => {
@@ -84,6 +89,39 @@ describe("FleetService", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
     expect(Number(res.json().expiresAtUnixMs)).toBeGreaterThan(Date.now());
+  });
+
+  it("returns a single node with its devices", async () => {
+    const res = await rpc("GetNode", { nodeId });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().node.name).toBe("4090-box");
+    expect(res.json().node.devices).toHaveLength(1);
+  });
+
+  // A malformed id, an absent id, and an id in another org must be a single
+  // indistinguishable outcome — otherwise GetNode is a cross-org existence
+  // probe. The malformed case is also the specific regression: nodes.id is a
+  // Postgres uuid column, so an unguarded eq() against a non-uuid string
+  // raises SQLSTATE 22P02, which Connect maps to Internal (500).
+  it("reports a malformed node id as not found, not as an internal error", async () => {
+    const res = await rpc("GetNode", { nodeId: "not-a-uuid" });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("reports a node in another organization as not found", async () => {
+    const otherOrg = `org_${randomUUID().slice(0, 8)}`;
+    await ownerDb.insert(organization).values({ id: otherOrg, name: "Other GetNode", slug: otherOrg, createdAt: new Date() });
+    const [theirs] = await ownerDb.insert(nodes).values({
+      orgId: otherOrg, name: "also-not-yours", publicKey: randomBytes(32),
+    }).returning({ id: nodes.id });
+
+    const res = await rpc("GetNode", { nodeId: theirs!.id });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("reports an absent node id as not found", async () => {
+    const res = await rpc("GetNode", { nodeId: randomUUID() });
+    expect(res.statusCode).toBe(404);
   });
 
   it("does not leak another organization's nodes", async () => {

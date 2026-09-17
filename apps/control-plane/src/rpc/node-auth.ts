@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { ownerDb, nodes } from "@modelhub/db";
 import { env } from "../env.js";
 import { redis } from "../redis.js";
+import { isUuid } from "../uuid.js";
 
 export class NodeAuthError extends Error {
   statusCode = 401;
@@ -10,7 +11,6 @@ export class NodeAuthError extends Error {
 }
 
 const PREFIX = "ModelHubNode ";
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Node's crypto verifies Ed25519 against a KeyObject, so wrap the raw 32 bytes
 // in the fixed SPKI prefix for Ed25519 rather than pulling in a dependency.
@@ -62,7 +62,7 @@ export async function authenticateNode(
   // non-uuid string throws a raw driver error rather than returning no
   // rows, so a malformed-but-4-part node id must be rejected here before
   // it ever reaches the query.
-  if (!UUID_RE.test(nodeId)) {
+  if (!isUuid(nodeId)) {
     throw new NodeAuthError("malformed node id");
   }
 

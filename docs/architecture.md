@@ -711,8 +711,11 @@ but are kept correct in case anything calls `Service.Run()` directly.
 runs `sweepOfflineNodes` on a 5-second timer (`startOfflineSweeper`,
 started only by `main.ts` — tests drive `sweepOfflineNodes` manually, on
 their own clock, so they don't race a real timer). It marks a node
-`degraded` after `DEGRADED_AFTER_MS` (15s — three missed 5s heartbeats) and
-`offline` after `OFFLINE_AFTER_MS` (30s — six missed heartbeats). The two
+`degraded` after `DEGRADED_AFTER_MS` and `offline` after
+`OFFLINE_AFTER_MS`, which are three and six times `SAMPLE_INTERVAL_MS`
+(15s and 30s at its 5s default) — three and six missed heartbeats, derived
+rather than hardcoded so the thresholds stay correct when the interval the
+server hands the agent is configured to something else. The two
 passes run in a specific order — offline first, then degraded — so that a
 node silent for 40 seconds lands on `offline` directly, rather than the
 degraded pass (which only touches nodes still `online`) catching it first

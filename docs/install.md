@@ -54,18 +54,24 @@ Verify the GPUs are seen:
     sudo rm /usr/local/bin/modelhub-agent
     sudo rm -rf /etc/modelhub
 
-`modelhub-agent uninstall` does exactly two things, and only these two:
+`modelhub-agent uninstall` does exactly three things, and only these three:
 
 1. Stops and removes the system service registration (the launchd job, the
    systemd unit, or the Windows service).
 2. Deletes this node's stored identity — the macOS keychain entry (or its
    file-fallback equivalent on a headless Linux box or a locked keyring),
    scoped to this config directory.
+3. Clears the enrollment recorded in `config.json`, so this node reads as
+   not enrolled afterwards. The identity and the enrollment have to go
+   together: a config that still claims to be enrolled while the key is gone
+   would let `install` register a service that can never authenticate, and
+   `run` would dial the control plane with the old node ID and be rejected
+   forever.
 
 It does **not** remove the installed binary, and it does **not** remove the
-rest of the config directory (`config.json`, logs). Those two `rm` commands
-above are how you remove them — `uninstall` will tell you plainly in its
-own output whether the service removal and the identity removal each
+config directory itself (the now-blank `config.json`, logs). Those two `rm`
+commands above are how you remove them — `uninstall` will tell you plainly
+in its own output whether the service removal and the identity removal each
 succeeded, so if one half fails you'll see which one and why, rather than a
 silent partial cleanup.
 
@@ -213,11 +219,17 @@ liveness sweep is actually running).
     modelhub-agent status
 
 **Pass:** `status` still reports the same node ID as step 2/3 (no
-re-enrollment happened — the identity survived the stop), and the Fleet
+re-enrollment happened — the enrollment survived the stop), and the Fleet
 page returns to `online` within 10 seconds.
-**Fail looks like:** `status` reports "not enrolled" (identity was lost —
-check nothing ran `uninstall` or deleted the config dir in between), or the
-server rejects the reconnect as an unrecognized node.
+**Fail looks like:** `status` reports "not enrolled" — the enrollment in
+`config.json` is gone (something ran `uninstall`, or the config dir was
+deleted); re-enroll. Note that `status` reads `config.json` only and never
+touches the private key, so it reports "enrolled" even when the key itself
+has been lost. That case shows up in the service's log instead, as `this
+node's config says it is enrolled as node <id>, but its identity is
+missing` — the fix is the same, re-enroll. The remaining failure is the node
+staying `offline` while the log shows the server rejecting the reconnect as
+an unrecognized node.
 
 ### 7. NVML device identity survives a reboot (multi-GPU box only)
 

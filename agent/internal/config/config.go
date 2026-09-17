@@ -42,3 +42,22 @@ func (c *Config) Save(dir string) error {
 	}
 	return writeFile(filepath.Join(dir, configFileName), data)
 }
+
+// ClearEnrollment blanks this node's enrollment in the on-disk config, so
+// Enrolled() reports false afterwards. It is not an error if no config file
+// exists.
+//
+// uninstall calls this alongside Identity.Delete(). Deleting the identity
+// while leaving the enrollment behind is what made `run` dial with the old
+// NodeID and a freshly minted key the server has never seen — an
+// unauthenticable loop with nothing saying why — and made `install` register
+// a service whose own guard was supposed to prevent exactly that.
+func ClearEnrollment(dir string) error {
+	if _, err := os.Stat(filepath.Join(dir, configFileName)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return (&Config{}).Save(dir)
+}

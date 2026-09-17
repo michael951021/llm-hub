@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,9 +19,23 @@ import (
 
 const keyringService = "com.modelhub.agent"
 
+// ErrNoIdentity reports that no key has been stored for this config
+// directory yet. It is the one error callers are expected to branch on:
+// the enroll path treats it as "first run, generate one", every other path
+// treats it as "this node's local state is broken, say so".
+var ErrNoIdentity = errors.New("no stored identity for this config directory")
+
 type Identity interface {
+	// Load returns the stored private key, or ErrNoIdentity if none has
+	// been stored. It never generates one. Everything except enrollment
+	// must use this: minting a key for an already-enrolled node produces
+	// one the server has never seen, which fails authentication forever
+	// with nothing to indicate the local state is inconsistent.
+	Load() (ed25519.PrivateKey, error)
+
 	// LoadOrCreate returns the stored private key, generating and persisting
-	// one on first use.
+	// one on first use. Only the enroll path should call it — enrollment is
+	// what registers the freshly minted public key with the server.
 	LoadOrCreate() (ed25519.PrivateKey, error)
 
 	// Delete removes any stored identity, leaving no key material behind.
@@ -32,25 +47,35 @@ type fileIdentity struct{ dir string }
 
 func NewFileIdentity(dir string) Identity { return &fileIdentity{dir: dir} }
 
-func (f *fileIdentity) LoadOrCreate() (ed25519.PrivateKey, error) {
-	path := filepath.Join(f.dir, identityFileName)
-	data, err := os.ReadFile(path)
+func (f *fileIdentity) Load() (ed25519.PrivateKey, error) {
+	data, err := os.ReadFile(filepath.Join(f.dir, identityFileName))
 	switch {
 	case err == nil:
 		return decodeKey(strings.TrimSpace(string(data)))
 	case errors.Is(err, fs.ErrNotExist):
-		_, priv, genErr := ed25519.GenerateKey(rand.Reader)
-		if genErr != nil {
-			return nil, genErr
-		}
-		encoded := base64.StdEncoding.EncodeToString(priv)
-		if writeErr := writeFile(path, []byte(encoded)); writeErr != nil {
-			return nil, writeErr
-		}
-		return priv, nil
+		return nil, ErrNoIdentity
 	default:
 		return nil, err
 	}
+}
+
+func (f *fileIdentity) LoadOrCreate() (ed25519.PrivateKey, error) {
+	priv, err := f.Load()
+	if err == nil {
+		return priv, nil
+	}
+	if !errors.Is(err, ErrNoIdentity) {
+		return nil, err
+	}
+	_, priv, genErr := ed25519.GenerateKey(rand.Reader)
+	if genErr != nil {
+		return nil, genErr
+	}
+	encoded := base64.StdEncoding.EncodeToString(priv)
+	if writeErr := writeFile(filepath.Join(f.dir, identityFileName), []byte(encoded)); writeErr != nil {
+		return nil, writeErr
+	}
+	return priv, nil
 }
 
 func (f *fileIdentity) Delete() error {
@@ -93,22 +118,63 @@ func keyringAccount(dir string) string {
 	return "node-key-" + hex.EncodeToString(sum[:8])
 }
 
+// Load consults the keychain first and the file fallback second — in both
+// the "keychain is unusable" case and the "keychain has no such entry"
+// case, because the fallback is exactly where the key lands when the
+// keychain was unavailable at the time the key was created.
+func (k *keyringIdentity) Load() (ed25519.PrivateKey, error) {
+	stored, err := keyring.Get(keyringService, k.account)
+	if err == nil {
+		return decodeKey(stored)
+	}
+	if errors.Is(err, keyring.ErrNotFound) {
+		return k.fallback.Load()
+	}
+	// The keychain exists but couldn't be used (e.g. it's locked) —
+	// distinct from ErrNotFound, where falling back silently is fine.
+	// If the fallback also fails, surface both causes: a bare file
+	// error here would hide the keychain problem, which is usually
+	// the one the user actually needs to act on.
+	priv, fbErr := k.fallback.Load()
+	switch {
+	case fbErr == nil:
+		return priv, nil
+	case errors.Is(fbErr, ErrNoIdentity):
+		// Deliberately *not* reported as ErrNoIdentity. The keychain is
+		// the backend that would be holding the key and we could not read
+		// it, so "this node has no identity" is not something we know.
+		// Callers turn ErrNoIdentity into "re-enroll", and re-enrolling on
+		// the strength of a merely locked keychain throws away a good key.
+		return nil, fmt.Errorf("keychain unavailable (%w), and there is no fallback identity file either", err)
+	default:
+		return nil, fmt.Errorf("keychain unavailable (%w), and the fallback file identity also failed: %w", err, fbErr)
+	}
+}
+
 func (k *keyringIdentity) LoadOrCreate() (ed25519.PrivateKey, error) {
 	stored, err := keyring.Get(keyringService, k.account)
 	if err == nil {
 		return decodeKey(stored)
 	}
 	if !errors.Is(err, keyring.ErrNotFound) {
-		// The keychain exists but couldn't be used (e.g. it's locked) —
-		// distinct from ErrNotFound, where falling back silently is fine.
-		// If the fallback also fails, surface both causes: a bare file
-		// error here would hide the keychain problem, which is usually
-		// the one the user actually needs to act on.
+		// Unusable keychain: the file fallback is both where an existing
+		// key would already be and where a new one has to go.
 		priv, fbErr := k.fallback.LoadOrCreate()
 		if fbErr != nil {
 			return nil, fmt.Errorf("keychain unavailable (%w), and the fallback file identity also failed: %w", err, fbErr)
 		}
 		return priv, nil
+	}
+	// The keychain works but holds no entry. An existing fallback file
+	// still wins over minting a new key: it may well be this node's real,
+	// already-enrolled identity, written back when the keychain was
+	// briefly unavailable.
+	priv, fbErr := k.fallback.Load()
+	if fbErr == nil {
+		return priv, nil
+	}
+	if !errors.Is(fbErr, ErrNoIdentity) {
+		return nil, fbErr
 	}
 
 	_, priv, genErr := ed25519.GenerateKey(rand.Reader)
@@ -116,6 +182,11 @@ func (k *keyringIdentity) LoadOrCreate() (ed25519.PrivateKey, error) {
 		return nil, genErr
 	}
 	if setErr := keyring.Set(keyringService, k.account, base64.StdEncoding.EncodeToString(priv)); setErr != nil {
+		// Record where the key actually went, and why. Without this a
+		// node's Ed25519 private key silently lands in a 0600 file
+		// instead of the OS keychain with nothing recording either fact.
+		slog.Warn("could not store this node's identity in the OS keychain; falling back to a 0600 file in the config directory",
+			"error", setErr, "service", keyringService, "account", k.account)
 		return k.fallback.LoadOrCreate()
 	}
 	return priv, nil

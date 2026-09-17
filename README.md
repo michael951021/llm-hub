@@ -177,15 +177,13 @@ pnpm --filter @modelhub/e2e test
 the real control plane and database — it needs `docker compose up -d`,
 migrations applied, and a Go toolchain, same as above.
 
-**macOS first-run stumble:** this suite's agent process stores its node
-identity in the real macOS keychain (service `com.modelhub.agent`), keyed
-by a fixed service/account — **not** scoped to the test's own temp config
-directory. If you've ever run `modelhub-agent enroll` manually on this
-Mac, or run this suite before, the test refuses to silently reuse or
-destroy that entry: it fails loudly with the exact `security
-delete-generic-password ...` command to clear it yourself, or you can set
-`MODELHUB_E2E_CLEAR_KEYCHAIN=1` to have the suite clear it for you (it
-still warns first). This only affects macOS; CI containers hit it never.
+**On macOS**, this suite's agent process stores its node identity in the
+real login keychain (service `com.modelhub.agent`), in an entry whose
+account name is derived from the config directory — here, the suite's own
+fresh temp directory, so it can never collide with a real identity from
+`modelhub-agent enroll`. The suite deletes that entry in `afterAll`, and a
+failure to delete it is not fatal. None of this applies on Linux or in CI,
+which have no keychain.
 
 ## Repository layout
 
@@ -242,11 +240,6 @@ connection as unrecognized.** Migrations were never applied against this
 database, or you're pointed at a different Postgres than the one you
 migrated. Re-run the migrate step above and confirm `DATABASE_URL` matches
 the running container's port (`5433` by default).
-
-**e2e suite fails on macOS with a keychain error.** See "macOS first-run
-stumble" above — it's a deliberate guard, not a bug. Follow the printed
-`security delete-generic-password` command, or set
-`MODELHUB_E2E_CLEAR_KEYCHAIN=1`.
 
 ## Where to read next
 

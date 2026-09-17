@@ -6,6 +6,23 @@ import { FleetService } from "@modelhub/proto";
 import { requireSession, HttpError, type SessionContext } from "../auth/session.js";
 import { mintPairingCode } from "../domain/pairing.js";
 import { buildNodeView } from "../domain/views.js";
+import { isUuid } from "../uuid.js";
+
+// Where the SQL lives, and why it is not all in one place:
+//
+//   - domain/ owns anything with an invariant — enrollment, pairing-code
+//     redemption, inventory reconciliation. Those have rules that must hold
+//     no matter who calls them, so they get one implementation and every
+//     transport goes through it.
+//   - rpc/ may read directly through withOrg() for pure projections: a
+//     SELECT with no invariant beyond "only this org's rows", which is
+//     exactly what withOrg() enforces.
+//   - No SQL outside withOrg()/ownerDb, ever. ownerDb is only for work with
+//     no single org context (see jobs/offline-sweeper.ts, rpc/node-auth.ts).
+//
+// That is why createPairingCode below delegates to domain/pairing.js while
+// listNodes and getNode query inline: minting a code has invariants (single
+// use, TTL, peppered hash), listing nodes has none.
 
 // Connect hands us its own context; requireSession wants something header-shaped.
 function asRequest(ctx: HandlerContext) {
@@ -49,6 +66,14 @@ export function registerFleetService(router: ConnectRouter): void {
 
     async getNode(req, ctx) {
       const { orgId } = await session(ctx);
+      // A malformed id, an id that does not exist, and an id belonging to
+      // another org must all come out as the same NotFound, so that a caller
+      // cannot use this endpoint to probe whether some node id exists in
+      // someone else's org. withOrg() covers the third case by filtering the
+      // row away; the shape check covers the first, which would otherwise
+      // reach a uuid column and raise SQLSTATE 22P02 — surfacing as Internal
+      // (500), both a different outcome and a worse one.
+      if (!isUuid(req.nodeId)) throw new ConnectError("node not found", Code.NotFound);
       return withOrg(orgId, async (tx) => {
         const [node] = await tx.select().from(nodes).where(eq(nodes.id, req.nodeId)).limit(1);
         if (!node) throw new ConnectError("node not found", Code.NotFound);
