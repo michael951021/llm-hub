@@ -4,15 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	modelhubv1 "github.com/modelhub/agent/gen/modelhub/v1"
 	"github.com/modelhub/agent/gen/modelhub/v1/modelhubv1connect"
@@ -78,28 +74,22 @@ func (r *recordingNodeService) Connect(
 	}
 }
 
-func newSession(t *testing.T, svc *recordingNodeService) (*Session, func()) {
+func newSession(t *testing.T, svc *recordingNodeService) *Session {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.Handle(modelhubv1connect.NewNodeServiceHandler(svc))
-	server := httptest.NewServer(h2c.NewHandler(mux, &http2.Server{}))
-
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	s := &Session{
-		ServerURL:  server.URL,
+	return &Session{
+		ServerURL:  newStubServer(t, svc),
 		NodeID:     "node-abc",
 		PrivateKey: priv,
 		Probes:     []inventory.Probe{inventory.NewFakeProbe(2)},
 		MinBackoff: 10 * time.Millisecond,
 		MaxBackoff: 50 * time.Millisecond,
 	}
-	return s, server.Close
 }
 
 func TestSessionReportsInventoryThenSamples(t *testing.T) {
 	svc := &recordingNodeService{}
-	session, closeServer := newSession(t, svc)
-	defer closeServer()
+	session := newSession(t, svc)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 	defer cancel()
@@ -129,8 +119,7 @@ func TestSessionReportsInventoryThenSamples(t *testing.T) {
 
 func TestSessionReconnectsAfterTheServerHangsUp(t *testing.T) {
 	svc := &recordingNodeService{dropAfter: 2}
-	session, closeServer := newSession(t, svc)
-	defer closeServer()
+	session := newSession(t, svc)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
 	defer cancel()
@@ -144,8 +133,7 @@ func TestSessionReconnectsAfterTheServerHangsUp(t *testing.T) {
 
 func TestSessionStopsWhenTheContextIsCancelled(t *testing.T) {
 	svc := &recordingNodeService{}
-	session, closeServer := newSession(t, svc)
-	defer closeServer()
+	session := newSession(t, svc)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

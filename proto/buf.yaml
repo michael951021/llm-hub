@@ -4,11 +4,8 @@ modules:
 lint:
   use: [STANDARD]
   ignore_only:
-    # Connect is a bidirectional stream carrying a shared oneof envelope
-    # (AgentMessage/ServerMessage) in both directions, not a unary
-    # request/response pair, so the standard RPC-name-pairing convention
-    # does not fit. The message names are mandated verbatim by the plan
-    # and used by later tasks (10, 15) — the rule is what's wrong here.
+    # Connect is a bidi stream of shared oneof envelopes (AgentMessage /
+    # ServerMessage), not a unary request/response pair.
     RPC_REQUEST_STANDARD_NAME:
       - modelhub/v1/node.proto
     RPC_RESPONSE_STANDARD_NAME:

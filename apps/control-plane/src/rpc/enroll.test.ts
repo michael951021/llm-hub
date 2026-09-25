@@ -1,170 +1,90 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { randomUUID, generateKeyPairSync } from "node:crypto";
-import { appSql, ownerSql, ownerDb, organization, nodes } from "@modelhub/db";
 import { eq } from "drizzle-orm";
-// NodeService.Enroll lives on the agent-facing app (buildAgentApp), not
-// the browser-facing one: it's the same generated service, and the same
-// caller (an agent), as NodeService.Connect. See agent-app.ts.
-import { buildAgentApp } from "../agent-app.js";
-import { mintPairingCode } from "../domain/pairing.js";
+import { nodes, ownerDb } from "@modelhub/db";
 import { enrollNode, EnrollmentError } from "../domain/nodes.js";
-import { redis } from "../redis.js";
+import { hostColumns } from "../domain/wire.js";
+import { mintPairingCode } from "../domain/pairing.js";
+import { buildAgentApp } from "../server.js";
+import { createOrg, newNodeKey } from "../test-helpers.js";
 
 let app: Awaited<ReturnType<typeof buildAgentApp>>;
-const orgId = `org_${randomUUID().slice(0, 8)}`;
-
-function newPublicKey(): Uint8Array {
-  const { publicKey } = generateKeyPairSync("ed25519");
-  const der = publicKey.export({ format: "der", type: "spki" }) as Buffer;
-  return new Uint8Array(der.subarray(der.length - 32)); // raw 32-byte key
-}
+let orgId: string;
 
 beforeAll(async () => {
-  // organization.createdAt has no DB-side default (see rls.test.ts /
-  // pairing.test.ts) so a direct insert must supply it.
-  await ownerDb.insert(organization).values({ id: orgId, name: "Fleet", slug: orgId, createdAt: new Date() });
+  orgId = await createOrg("Fleet");
   app = await buildAgentApp();
 });
-afterAll(async () => {
-  await app.close();
-  await redis.quit();
-  await appSql.end();
-  await ownerSql.end();
-});
+afterAll(async () => { await app.close(); });
 
-async function enroll(body: Record<string, unknown>) {
+const newCode = async () => (await mintPairingCode(orgId, "user_1", "")).code;
+
+function enroll(pairingCode: string, publicKey: Uint8Array, extra: Record<string, unknown> = {}) {
   return app.inject({
     method: "POST",
     url: "/modelhub.v1.NodeService/Enroll",
     headers: { "content-type": "application/json" },
-    payload: body,
+    payload: {
+      pairingCode,
+      publicKey: Buffer.from(publicKey).toString("base64"),
+      nodeName: "node",
+      host: { hostname: "h", platform: "linux", arch: "amd64" },
+      ...extra,
+    },
   });
 }
 
 describe("NodeService.Enroll", () => {
   it("creates a node bound to the code's organization", async () => {
-    const { code } = await mintPairingCode(orgId, "user_1", "mac-studio");
-    const publicKey = newPublicKey();
-
-    const res = await enroll({
-      pairingCode: code,
-      publicKey: Buffer.from(publicKey).toString("base64"),
+    const { publicKey } = newNodeKey();
+    const res = await enroll(await newCode(), publicKey, {
       nodeName: "mac-studio",
       host: {
         hostname: "mac-studio.local", platform: "darwin", arch: "arm64",
-        osVersion: "15.0", agentVersion: "0.1.0",
-        totalMemoryBytes: "137438953472", cpuCores: 24,
+        osVersion: "15.0", agentVersion: "0.1.0", totalMemoryBytes: "137438953472", cpuCores: 24,
       },
     });
 
     expect(res.statusCode).toBe(200);
-    const body = res.json();
-    expect(body.orgId).toBe(orgId);
-    expect(body.nodeId).toBeTruthy();
-
-    const [row] = await ownerDb.select().from(nodes).where(eq(nodes.id, body.nodeId));
-    expect(row!.orgId).toBe(orgId);
-    expect(row!.platform).toBe("darwin");
+    expect(res.json()).toMatchObject({ orgId, orgName: "Fleet" });
+    const [row] = await ownerDb.select().from(nodes).where(eq(nodes.id, res.json().nodeId));
+    expect(row).toMatchObject({ orgId, name: "mac-studio", platform: "darwin", cpuCores: 24 });
     expect(Buffer.from(row!.publicKey)).toEqual(Buffer.from(publicKey));
   });
 
-  it("rejects an invalid pairing code", async () => {
-    const res = await enroll({
-      pairingCode: "ZZZZ-ZZZZ",
-      publicKey: Buffer.from(newPublicKey()).toString("base64"),
-      nodeName: "nope",
-      host: { hostname: "h", platform: "linux", arch: "amd64" },
-    });
-    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+  it("rejects an invalid pairing code as invalid_argument", async () => {
+    const res = await enroll("ZZZZ-ZZZZ", newNodeKey().publicKey);
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ code: "invalid_argument", message: "unknown pairing code" });
   });
 
   it("rejects a public key that is not 32 bytes", async () => {
-    const { code } = await mintPairingCode(orgId, "user_1", "bad-key");
-    const res = await enroll({
-      pairingCode: code,
-      publicKey: Buffer.from(new Uint8Array(16)).toString("base64"),
-      nodeName: "bad-key",
-      host: { hostname: "h", platform: "linux", arch: "amd64" },
-    });
-    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+    const res = await enroll(await newCode(), new Uint8Array(16));
+    expect(res.statusCode).toBe(400);
   });
 
-  it("rejects a public key already registered to another node", async () => {
-    const publicKey = newPublicKey();
-    const first = await mintPairingCode(orgId, "user_1", "n1");
-    const second = await mintPairingCode(orgId, "user_1", "n2");
-    const payload = (code: string) => ({
-      pairingCode: code,
-      publicKey: Buffer.from(publicKey).toString("base64"),
-      nodeName: "dup",
-      host: { hostname: "h", platform: "linux", arch: "amd64" },
-    });
+  it("rejects an already-enrolled key without burning the pairing code", async () => {
+    const { publicKey } = newNodeKey();
+    expect((await enroll(await newCode(), publicKey)).statusCode).toBe(200);
 
-    expect((await enroll(payload(first.code))).statusCode).toBe(200);
-    expect((await enroll(payload(second.code))).statusCode).toBeGreaterThanOrEqual(400);
-  });
-
-  it("does not consume the pairing code when enrollment fails on a duplicate key", async () => {
-    const registeredKey = newPublicKey();
-    const freshKey = newPublicKey();
-
-    // Register registeredKey once so it is a genuine duplicate on the next attempt.
-    const setup = await mintPairingCode(orgId, "user_1", "already-enrolled");
-    expect((await enroll({
-      pairingCode: setup.code,
-      publicKey: Buffer.from(registeredKey).toString("base64"),
-      nodeName: "already-enrolled",
-      host: { hostname: "h", platform: "linux", arch: "amd64" },
-    })).statusCode).toBe(200);
-
-    const { code } = await mintPairingCode(orgId, "user_1", "retry");
-
-    const rejected = await enroll({
-      pairingCode: code,
-      publicKey: Buffer.from(registeredKey).toString("base64"),
-      nodeName: "retry",
-      host: { hostname: "h", platform: "linux", arch: "amd64" },
-    });
-    expect(rejected.statusCode).toBeGreaterThanOrEqual(400);
-
-    // The code must not have been burned by the failed attempt above: it
-    // should still redeem successfully for a different, unregistered key.
-    const accepted = await enroll({
-      pairingCode: code,
-      publicKey: Buffer.from(freshKey).toString("base64"),
-      nodeName: "retry",
-      host: { hostname: "h", platform: "linux", arch: "amd64" },
-    });
-    expect(accepted.statusCode).toBe(200);
+    const code = await newCode();
+    const duplicate = await enroll(code, publicKey);
+    expect(duplicate.statusCode).toBe(400);
+    expect(duplicate.json().message).toMatch(/already enrolled/);
+    expect((await enroll(code, newNodeKey().publicKey)).statusCode).toBe(200);
   });
 
   it("maps a concurrent duplicate-key race to EnrollmentError for the loser", async () => {
-    // Two valid, distinct pairing codes racing the same public key: both
-    // can pass the app-level ownerDb uniqueness check (it takes no lock)
-    // before either INSERT commits, so the loser must be caught by the
-    // nodes_public_key_idx unique-violation mapping instead, not surface
-    // as an opaque/unmapped error. This calls enrollNode directly (not
-    // over HTTP) so the assertion is on the domain error type itself.
-    const publicKey = newPublicKey();
-    const first = await mintPairingCode(orgId, "user_1", "race-1");
-    const second = await mintPairingCode(orgId, "user_1", "race-2");
-    const host = {
-      hostname: "h", platform: "linux", arch: "amd64",
-      osVersion: "", agentVersion: "", totalMemoryBytes: 0n, cpuCores: 0,
-    };
-
+    // Both can pass the app-level check before either insert commits; the
+    // unique index has to catch the loser.
+    const { publicKey } = newNodeKey();
+    const host = hostColumns(undefined);
     const results = await Promise.allSettled([
-      enrollNode({ pairingCode: first.code, publicKey, nodeName: "race-1", host }),
-      enrollNode({ pairingCode: second.code, publicKey, nodeName: "race-2", host }),
+      enrollNode({ pairingCode: await newCode(), publicKey, nodeName: "race-1", host }),
+      enrollNode({ pairingCode: await newCode(), publicKey, nodeName: "race-2", host }),
     ]);
 
-    const fulfilled = results.filter((r) => r.status === "fulfilled");
-    const rejected = results.filter((r) => r.status === "rejected");
-    expect(fulfilled).toHaveLength(1);
-    expect(rejected).toHaveLength(1);
-
-    const loser = (rejected as PromiseRejectedResult[])[0]!;
-    expect(loser.reason).toBeInstanceOf(EnrollmentError);
-    expect((loser.reason as EnrollmentError).message).toMatch(/already enrolled/);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const loser = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    expect(loser?.reason).toBeInstanceOf(EnrollmentError);
   });
 });

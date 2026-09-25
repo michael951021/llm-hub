@@ -1,3 +1,5 @@
+// Package config owns this agent's on-disk state: config.json (which server
+// and node this is) and the node's Ed25519 identity (identity.go).
 package config
 
 import (
@@ -6,6 +8,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+)
+
+const (
+	configFileName   = "config.json"
+	identityFileName = "identity.key"
 )
 
 type Config struct {
@@ -20,6 +28,27 @@ func (c *Config) Enrolled() bool {
 	return c.NodeID != "" && c.ServerURL != ""
 }
 
+// Dir returns the directory holding this agent's config and identity:
+// $MODELHUB_CONFIG_DIR if set, a machine-wide path when running as root
+// (i.e. as a system service), otherwise the user's config directory.
+func Dir() string {
+	if custom := os.Getenv("MODELHUB_CONFIG_DIR"); custom != "" {
+		return custom
+	}
+	if os.Geteuid() == 0 {
+		if runtime.GOOS == "windows" {
+			return filepath.Join(os.Getenv("ProgramData"), "ModelHub")
+		}
+		return "/etc/modelhub"
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return ".modelhub"
+	}
+	return filepath.Join(base, "modelhub")
+}
+
+// Load reads dir's config. A missing file is an empty (unenrolled) config.
 func Load(dir string) (*Config, error) {
 	data, err := os.ReadFile(filepath.Join(dir, configFileName))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -43,21 +72,27 @@ func (c *Config) Save(dir string) error {
 	return writeFile(filepath.Join(dir, configFileName), data)
 }
 
-// ClearEnrollment blanks this node's enrollment in the on-disk config, so
-// Enrolled() reports false afterwards. It is not an error if no config file
-// exists.
-//
-// uninstall calls this alongside Identity.Delete(). Deleting the identity
-// while leaving the enrollment behind is what made `run` dial with the old
-// NodeID and a freshly minted key the server has never seen — an
-// unauthenticable loop with nothing saying why — and made `install` register
-// a service whose own guard was supposed to prevent exactly that.
+// ClearEnrollment blanks the enrollment in dir's config, if there is one.
+// It must go together with Identity.Delete: a config that still claims to be
+// enrolled with no key behind it can never authenticate.
 func ClearEnrollment(dir string) error {
-	if _, err := os.Stat(filepath.Join(dir, configFileName)); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
+	if _, err := os.Stat(filepath.Join(dir, configFileName)); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
 		return err
 	}
 	return (&Config{}).Save(dir)
+}
+
+// writeFile writes a 0600 file via temp-and-rename, so a crash never leaves
+// a truncated config or half-written private key behind.
+func writeFile(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

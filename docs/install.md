@@ -233,7 +233,7 @@ an unrecognized node.
 
 ### 7. NVML device identity survives a reboot (multi-GPU box only)
 
-This checks a fix that has never executed on real hardware: Task 13 switched
+This checks a fix that has never executed on real hardware: the agent switched
 the CUDA `LocalID` from NVML's enumeration index to `GetUUID()`, specifically
 because NVIDIA does not guarantee enumeration order is stable across a
 reboot — and the control plane deletes any device a node stops reporting.

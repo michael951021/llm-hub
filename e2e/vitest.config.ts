@@ -2,10 +2,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    setupFiles: ["./vitest.setup.ts"],
-    // The enroll+connect test and the offline-sweep test both do real
-    // network and process work against a real database; run them one at
-    // a time rather than in parallel workers.
+    setupFiles: ["../vitest.env.ts"],
+    // Builds and runs a real agent process against a real database.
     fileParallelism: false,
     testTimeout: 120_000,
     hookTimeout: 120_000,

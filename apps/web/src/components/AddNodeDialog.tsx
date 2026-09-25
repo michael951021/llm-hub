@@ -1,11 +1,8 @@
 import { useState } from "react";
 import { fleetClient } from "../api.js";
 
-// The listener split means browser traffic (this app) is HTTP/1.1 on PORT
-// (3000, proxied from 5173 in dev), while the agent's NodeService is h2c
-// HTTP/2 on AGENT_PORT (3001) — a listener the browser itself can never
-// speak to. `window.location.origin` would print the wrong port here; the
-// agent needs to be told to dial AGENT_PORT explicitly.
+// The agent dials the control plane's h2c listener (AGENT_PORT), not the
+// origin this page was served from.
 const AGENT_URL = import.meta.env.VITE_AGENT_URL ?? "http://localhost:3001";
 
 export function AddNodeDialog() {
@@ -15,10 +12,6 @@ export function AddNodeDialog() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Minting a code is the only mutating action in the product. Without the
-  // catch, a failed createPairingCode became an unhandled rejection and the
-  // button just slid back to "Generate pairing code" as though nothing had
-  // been asked for. Surfaced the same way fleet.tsx and sign-in.tsx do.
   async function mint() {
     setBusy(true);
     setError(null);

@@ -2,8 +2,7 @@ import {
   createRootRoute, createRoute, createRouter, Outlet,
 } from "@tanstack/react-router";
 import { RootLayout } from "./routes/root.js";
-import { SignInRoute } from "./routes/sign-in.js";
-import { SignUpRoute } from "./routes/sign-up.js";
+import { SignInRoute, SignUpRoute } from "./routes/auth.js";
 import { FleetRoute } from "./routes/fleet.js";
 
 const rootRoute = createRootRoute({ component: Outlet });

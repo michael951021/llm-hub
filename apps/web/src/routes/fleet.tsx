@@ -7,8 +7,7 @@ export function FleetRoute() {
   const { data, isPending, error } = useQuery({
     queryKey: ["fleet", "nodes"],
     queryFn: () => fleetClient.listNodes({}),
-    // Samples arrive every 5s; polling at 3s keeps the page visibly live
-    // without hammering the control plane. Replaced by a stream in slice 8.
+    // Samples arrive every 5s; a 3s poll keeps the page visibly live.
     refetchInterval: 3_000,
   });
 

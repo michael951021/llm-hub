@@ -1,7 +1,4 @@
-// Pure presentation helpers. No budget arithmetic lives here — the numbers
-// this formats (totalBytes, managedBytes, availableBytes, ...) already come
-// out of computeBudget on the server; this module only turns them into
-// strings a person can read.
+// Presentation only: no budget arithmetic happens in the browser.
 
 const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"] as const;
 

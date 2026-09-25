@@ -87,10 +87,7 @@ export function computeBudget(input: MemoryInput): MemoryBudget {
       ceiling = totalBytes;
       break;
     }
-    // A kind outside the union used to fall through with headroomBytes and
-    // ceiling unassigned, making availableBytes NaN — and BigInt(NaN) throws,
-    // so one poisoned device row took ListNodes down with a 500 for the
-    // entire org rather than for that one device. Fail at the source instead.
+    // Fail loudly: falling through would yield NaN, and BigInt(NaN) throws later.
     default:
       throw new Error(`unknown device kind: ${String(kind)}`);
   }

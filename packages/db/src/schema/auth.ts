@@ -1,25 +1,8 @@
-// Generated from apps/control-plane/src/auth/auth.ts's Better Auth config.
-//
-// better-auth 1.7.5 ships no `better-auth` CLI binary, and the separately
-// published `@better-auth/cli` package hasn't caught up past 1.4.x, so
-// `better-auth generate` (as originally sketched for this step) isn't a
-// runnable command for the version pinned in this workspace. This file was
-// produced instead by driving @better-auth/drizzle-adapter's internal
-// generateDrizzleSchema() directly against the real `auth` config -- the
-// same function the CLI would have called -- via a one-off script. See
-// task-6-report.md for the full explanation.
-//
-// One block from that generator's raw output was dropped: a trailing
-// `authRelations = defineRelationsPart(...)` export. That's Drizzle's
-// relations-v2 API, which needs drizzle-orm >=0.45; this workspace pins
-// drizzle-orm ^0.36.0 (packages/db/package.json, set in Task 3) and
-// `defineRelationsPart` does not exist in 0.36.4. It isn't needed here:
-// every foreign key below is already expressed with a plain `.references()`
-// column reference, which is all fleet.ts and the RLS layer use.
-//
-// To regenerate after changing the Better Auth config, rerun the generator
-// script against the updated auth.ts and reapply the diff by hand (the
-// relations block still needs to be dropped the same way).
+// Better Auth's tables, generated from apps/control-plane/src/auth/auth.ts via
+// @better-auth/drizzle-adapter's generateDrizzleSchema() (better-auth ships no
+// CLI for this version). The generator's trailing `authRelations` block was
+// dropped: it needs drizzle-orm >= 0.45. Regenerate by hand after changing the
+// Better Auth config. RLS is deliberately off for all of these tables.
 import { pgTable, text, timestamp, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const user = pgTable("user", {
@@ -41,8 +24,7 @@ export const session = pgTable("session", {
   ipAddress: text("ip_address"),
   userAgent: text("user_agent"),
   userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
-  // Added by the organization plugin. requireSession() falls back to the
-  // user's first organization when this is unset.
+  // Added by the organization plugin.
   activeOrganizationId: text("active_organization_id"),
 }, (table) => [
   index("session_userId_idx").on(table.userId),
@@ -77,9 +59,6 @@ export const verification = pgTable("verification", {
   index("verification_identifier_idx").on(table.identifier),
 ]);
 
-// fleet.ts's nodes/devices/pairing_codes tables reference this table's `id`
-// column. RLS is deliberately NOT enabled on this table (or any other table
-// in this file) -- Better Auth needs unrestricted access to its own tables.
 export const organization = pgTable("organization", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),

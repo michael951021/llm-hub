@@ -1,13 +1,15 @@
 package inventory
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
-// Every probe must satisfy these, including the real hardware ones. Run this
-// suite against whatever probes are compiled into the current build.
+// Every probe compiled into this build, real hardware included, must satisfy these.
 func TestProbeConformance(t *testing.T) {
 	probes := append([]Probe{NewFakeProbe(2)}, DefaultProbes()...)
 
@@ -80,30 +82,38 @@ func TestSampleAllReturnsOneSamplePerDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	samples, err := inv.SampleAll(context.Background())
-	if err != nil {
-		t.Fatalf("SampleAll: %v", err)
-	}
-	if len(samples) != 3 {
-		t.Fatalf("expected 3 samples, got %d", len(samples))
+	if n := len(inv.SampleAll(context.Background())); n != 3 {
+		t.Fatalf("expected 3 samples, got %d", n)
 	}
 }
 
-func TestSampleAllSkipsAFailingProbeWithoutLosingTheRest(t *testing.T) {
-	good := NewFakeProbe(1)
+func TestSampleAllLogsAndSkipsAFailingDeviceWithoutLosingTheRest(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	bad := NewFakeProbe(1)
 	bad.SampleErr = errors.New("gpu fell off the bus")
-
-	inv, err := Collect(context.Background(), []Probe{good, bad})
+	inv, err := Collect(context.Background(), []Probe{NewFakeProbe(1), bad})
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	samples, err := inv.SampleAll(context.Background())
-	if err != nil {
-		t.Fatalf("SampleAll should tolerate a failing probe, got %v", err)
+
+	if n := len(inv.SampleAll(context.Background())); n != 1 {
+		t.Fatalf("expected the healthy device to still report, got %d samples", n)
 	}
-	if len(samples) != 1 {
-		t.Fatalf("expected the healthy device to still report, got %d samples", len(samples))
+	for _, want := range []string{"WARN", bad.Name() + ":0", "gpu fell off the bus"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log output missing %q; got: %s", want, logs.String())
+		}
+	}
+}
+
+func TestCollectRejectsDuplicateLocalIDs(t *testing.T) {
+	p := NewFakeProbe(1)
+	if _, err := Collect(context.Background(), []Probe{p, p}); err == nil {
+		t.Fatal("expected an error when two probes report the same LocalID")
 	}
 }
 

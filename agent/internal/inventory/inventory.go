@@ -1,3 +1,6 @@
+// Package inventory discovers and samples this machine's compute devices.
+// Probes (one per device class, selected by build tags) know nothing about
+// the network, which is what makes the connect loop testable without hardware.
 package inventory
 
 import (
@@ -25,15 +28,9 @@ const (
 
 // Device holds facts that do not change while the machine is running.
 //
-// TotalBytes is per device, and devices on the same host may be backed by the
-// same physical memory. On Apple silicon the CPU probe and the Metal probe
-// both report the machine's physical RAM as TotalBytes, so a 16 GiB Mac
-// reports two devices of 16 GiB each and the device totals add up to more
-// than the host has. That is by design, not double counting: the scheduler
-// budgets `cpu` and `metal` independently against the same unified memory,
-// and each budget is correct on its own terms. A consumer must therefore
-// never sum device TotalBytes to derive node capacity — use HostInfo's
-// TotalMemoryBytes for that.
+// Never sum TotalBytes to get node capacity: on Apple silicon the cpu and
+// metal devices both report the same unified memory, and each is budgeted
+// independently against it. Use HostInfo.TotalMemoryBytes instead.
 type Device struct {
 	LocalID           string
 	Kind              Kind
@@ -66,23 +63,21 @@ type HostInfo struct {
 	CPUCores         int
 }
 
-// Probe discovers and samples one class of device. Implementations know
-// nothing about the network; that separation is what makes the whole connect
-// loop testable without hardware.
+// Probe discovers and samples one class of device.
 type Probe interface {
 	Name() string
 	Discover(ctx context.Context) ([]Device, error)
 	Sample(ctx context.Context, d Device) (Sample, error)
 }
 
-// Inventory is the result of one discovery pass: the devices found, plus which
-// probe owns each one. Discovery happens once per connection; sampling then
-// runs every few seconds against this map rather than re-enumerating hardware.
+// Inventory is one discovery pass: the devices found and the probe that owns
+// each. Discovery runs once per connection; sampling reuses it.
 type Inventory struct {
 	Devices []Device
 	owner   map[string]Probe
 }
 
+// Collect fails if any probe fails to discover, or two report the same LocalID.
 func Collect(ctx context.Context, probes []Probe) (*Inventory, error) {
 	inv := &Inventory{owner: map[string]Probe{}}
 	for _, p := range probes {
@@ -101,28 +96,20 @@ func Collect(ctx context.Context, probes []Probe) (*Inventory, error) {
 	return inv, nil
 }
 
-// SampleAll samples every device, tolerating a probe that fails: one GPU that
-// has fallen off the bus must not stop the node reporting the others.
-func (i *Inventory) SampleAll(ctx context.Context) ([]Sample, error) {
+// SampleAll samples every device. A device that fails to sample is logged and
+// skipped: one GPU that has fallen off the bus must not silence the others.
+func (i *Inventory) SampleAll(ctx context.Context) []Sample {
 	samples := make([]Sample, 0, len(i.Devices))
 	for _, d := range i.Devices {
-		p, ok := i.owner[d.LocalID]
-		if !ok {
-			continue
-		}
+		p := i.owner[d.LocalID]
 		s, err := p.Sample(ctx, d)
 		if err != nil {
-			// Log and drop: one device that has stopped sampling must not
-			// stop the node reporting the rest. Deliberately unfiltered and
-			// undeduplicated — a broken GPU will be noisy at the sample
-			// interval, and that noise is preferable to a device failing
-			// silently. Slice 8's observability work replaces this wholesale.
 			slog.Warn("inventory: device sample failed", "local_id", d.LocalID, "probe", p.Name(), "err", err)
 			continue
 		}
 		samples = append(samples, s)
 	}
-	return samples, nil
+	return samples
 }
 
 // DefaultProbes returns every probe available in this build, on this machine.

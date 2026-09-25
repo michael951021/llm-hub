@@ -65,8 +65,8 @@ request, as three independent jobs:
   whatever platform the runner is (`ubuntu-latest`), so this proves the CPU
   probe and the platform-independent packages; it does not build or run the
   Metal probe (`//go:build darwin`) or the NVML probe (`//go:build nvml`,
-  never passed as a build tag here) — see `docs/testing.md` §3 for the full
-  "proven vs. reviewed-only" breakdown.
+  never passed as a build tag here) — see `docs/codebase.md` ("What the tests
+  don't cover").
 - **`proto`** — `buf lint proto`, and on pull requests only, `buf breaking
   proto --against` the PR's base branch. This is what stops a change from
   silently breaking wire compatibility between the control plane and
@@ -104,7 +104,7 @@ require TLS to negotiate HTTP/2 via ALPN — while the agent's bidirectional
 plain-text ports sidesteps needing a TLS certificate for local development.
 
 In production, both listeners must sit behind TLS. The clean end state
-(noted directly in `apps/control-plane/src/agent-app.ts`'s own comments) is
+(see the listener comment in `apps/control-plane/src/server.ts`) is
 to collapse this back to **a single TLS-terminated port using ALPN with
 `allowHTTP1`**: the TLS handshake negotiates HTTP/2 for agents and falls
 back to HTTP/1.1 for browsers, on one hostname and one port, instead of two.
@@ -283,10 +283,9 @@ For a first production deployment, roughly in order:
   does inject a clock rather than sleeping out the real 30-second
   `OFFLINE_AFTER_MS` threshold, but the online half does not.) This makes
   the suite genuinely slow and mildly sensitive to a loaded CI runner; see
-  `docs/testing.md` for the full, honest breakdown of what every suite does
-  and does not prove, including the NVML probe having never executed
-  against real hardware and the web app having no browser-automation
-  coverage at all.
+  `docs/codebase.md` for what the suites do and do not prove, including the
+  NVML probe having never executed against real hardware and the web app
+  having no browser-automation coverage at all.
 - **Nothing in this slice runs models.** There is no model runtime,
   scheduler, or workload execution anywhere in this repository —
   `managedBytes` is always zero because nothing is ever loaded. Every

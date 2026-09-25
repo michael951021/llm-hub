@@ -106,18 +106,9 @@ See the walkthrough below for `enroll`/`run`; see `docs/install.md` for
 installing it as a persistent system service instead of running it in the
 foreground.
 
-### Why two listeners
-
-`buildApp()` (`apps/control-plane/src/app.ts`) is plain HTTP/1.1 on
-`PORT` (default `3000`) and serves everything a browser talks to:
-`/healthz`, `/api/auth/*` (Better Auth), `/api/me`, and `FleetService`.
-`buildAgentApp()` (`apps/control-plane/src/agent-app.ts`) is cleartext
-HTTP/2 (h2c) on `AGENT_PORT` (default `3001`) and serves `NodeService`
-(`Enroll` and the heartbeat `Connect` stream). Browsers cannot speak
-cleartext h2c at all, and the agent's bidirectional `Connect` stream needs
-real HTTP/2 framing — hence the split into two listeners for local dev.
-`docs/deployment.md` covers how this collapses to one TLS port in
-production.
+The control plane runs two listeners: browsers on `:3000` (HTTP/1.1) and
+agents on `:3001` (cleartext HTTP/2, which browsers can't speak). See
+`docs/codebase.md` §1.
 
 ## The five-minute walkthrough
 
@@ -165,9 +156,7 @@ Go module:
 cd agent && go vet ./... && go test ./...
 ```
 
-End-to-end suite (also runs as part of `pnpm test`, since it's a normal
-workspace package with its own `test` script — `pnpm test:e2e` is just a
-convenience for running only this suite):
+End-to-end suite (also part of `pnpm test`):
 
 ```bash
 pnpm --filter @modelhub/e2e test
@@ -177,39 +166,15 @@ pnpm --filter @modelhub/e2e test
 the real control plane and database — it needs `docker compose up -d`,
 migrations applied, and a Go toolchain, same as above.
 
-**On macOS**, this suite's agent process stores its node identity in the
-real login keychain (service `com.modelhub.agent`), in an entry whose
-account name is derived from the config directory — here, the suite's own
-fresh temp directory, so it can never collide with a real identity from
-`modelhub-agent enroll`. The suite deletes that entry in `afterAll`, and a
-failure to delete it is not fatal. None of this applies on Linux or in CI,
-which have no keychain.
+On macOS the e2e agent stores its key in the login keychain under an entry
+scoped to the suite's temp directory; the suite deletes it afterwards.
 
 ## Repository layout
 
-```
-model-hub/
-├── apps/
-│   ├── control-plane/     Fastify + ConnectRPC server (two listeners — see above)
-│   │   └── src/{app,agent-app}.ts, auth/, domain/, rpc/, jobs/, env.ts
-│   └── web/                React SPA (TanStack Router/Query, Tailwind)
-├── agent/                  Go CLI + long-running service (enroll/run/install/status/uninstall)
-│   ├── cmd/agent/          entrypoint
-│   ├── internal/           config, identity, inventory probes, transport, service wrapper
-│   └── .goreleaser.yaml    release build config
-├── packages/
-│   ├── core/                pure memory-budget math (the only place it lives)
-│   ├── db/                  Drizzle schema, migrations, owner/app connections
-│   └── proto-ts/            generated TypeScript from proto/ (committed)
-├── proto/                   protobuf sources (buf lint/breaking checked in CI)
-├── e2e/                     end-to-end suite: real agent binary + real control plane
-├── docker-compose.yml       local Postgres (TimescaleDB image) + Redis
-├── docs/
-│   ├── install.md           installing/enrolling the agent on real hardware
-│   ├── deployment.md        local vs CI vs production, what's done vs what's left
-│   └── architecture.md      system design and request flow
-└── .github/workflows/ci.yml
-```
+`apps/control-plane` (Fastify + Connect server), `apps/web` (React SPA),
+`agent/` (Go CLI and service), `packages/{core,db,proto-ts}` (memory model,
+database, generated contract), `proto/` (the contract), `e2e/`. The full map,
+with what each module owns, is in `docs/codebase.md` §2.
 
 ## Troubleshooting
 
@@ -243,13 +208,10 @@ the running container's port (`5433` by default).
 
 ## Where to read next
 
-- `docs/install.md` — installing and enrolling the agent on real hardware
-  (macOS, Linux with NVIDIA GPUs), running it as a system service, and the
-  manual verification checklist that closes out this slice.
-- `docs/deployment.md` — what's already automated (local Compose, CI,
-  GoReleaser, the service installer) versus what a production operator
-  still has to provide (TLS, managed Postgres/Redis, secrets, agent
-  distribution).
-- `docs/architecture.md` — system design: what calls what, and why the
-  boundaries (two listeners, owner-vs-app database roles, Ed25519 node
-  identity) sit where they do.
+- `docs/codebase.md` — how the code is organized, the four request flows, the
+  memory model, tenant isolation, the rules a change must keep, and testing.
+- `docs/install.md` — installing the agent on real hardware (macOS, Linux with
+  NVIDIA GPUs) as a system service, plus the manual verification checklist.
+- `docs/deployment.md` — what is automated today versus what production still
+  needs (TLS, managed Postgres/Redis, secrets, agent distribution).
+- `docs/superpowers/specs/` — the product design across all ten slices.

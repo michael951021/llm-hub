@@ -1,25 +1,23 @@
-import { createPublicKey, verify, sign, randomUUID, type KeyObject } from "node:crypto";
+import { createPublicKey, verify, type KeyObject } from "node:crypto";
+import { Code, ConnectError } from "@connectrpc/connect";
 import { eq } from "drizzle-orm";
-import { ownerDb, nodes } from "@modelhub/db";
+import { isUuid, ownerDb, nodes } from "@modelhub/db";
 import { env } from "../env.js";
 import { redis } from "../redis.js";
-import { isUuid } from "../uuid.js";
 
-export class NodeAuthError extends Error {
-  statusCode = 401;
-  code = "node_unauthenticated";
+export class NodeAuthError extends ConnectError {
+  constructor(message: string) {
+    super(message, Code.Unauthenticated);
+  }
 }
 
-const PREFIX = "ModelHubNode ";
+export const NODE_AUTH_SCHEME = "ModelHubNode ";
 
-// Node's crypto verifies Ed25519 against a KeyObject, so wrap the raw 32 bytes
-// in the fixed SPKI prefix for Ed25519 rather than pulling in a dependency.
-// Confirmed against a real generateKeyPairSync("ed25519") key: this constant
-// concatenated with the last 32 bytes of a real SPKI DER export reproduces
-// that export byte-for-byte.
+// DER prefix that turns a raw 32-byte Ed25519 key into SPKI, which is what
+// node:crypto verifies against.
 const SPKI_ED25519_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
-function toKeyObject(raw: Uint8Array) {
+function toKeyObject(raw: Uint8Array): KeyObject {
   return createPublicKey({
     key: Buffer.concat([SPKI_ED25519_PREFIX, Buffer.from(raw)]),
     format: "der",
@@ -28,43 +26,22 @@ function toKeyObject(raw: Uint8Array) {
 }
 
 /**
- * Builds the wire-format Authorization header value for a node's outgoing
- * request. Mirrored byte-for-byte in Go by Task 15 — the payload signed is
- * "<nodeId>.<unixMillis>.<nonceBase64Url>", and every field is base64url
- * (unpadded on the Go side; Node's decoder accepts both).
+ * Verifies `ModelHubNode <nodeId>.<unixMillis>.<nonce>.<signature>`: an
+ * Ed25519 signature (base64url) over the first three fields, joined by dots
+ * exactly as received. Built by the agent's transport.AuthHeader. Rejects
+ * timestamps outside NODE_AUTH_SKEW_MS and any nonce seen before.
+ *
+ * Runs on ownerDb: which org the node belongs to is this function's output.
  */
-export function buildNodeAuthHeader(
-  nodeId: string,
-  privateKey: KeyObject,
-  atMs: number = Date.now(),
-  nonce: string = randomUUID(),
-): string {
-  const n = Buffer.from(nonce).toString("base64url");
-  const payload = `${nodeId}.${atMs}.${n}`;
-  const sig = sign(null, Buffer.from(payload), privateKey).toString("base64url");
-  return `${PREFIX}${payload}.${sig}`;
-}
+export async function authenticateNode(header: string | null): Promise<{ nodeId: string; orgId: string }> {
+  if (!header?.startsWith(NODE_AUTH_SCHEME)) throw new NodeAuthError("missing node authorization header");
 
-export async function authenticateNode(
-  headerValue: string | undefined,
-): Promise<{ nodeId: string; orgId: string }> {
-  if (!headerValue || !headerValue.startsWith(PREFIX)) {
-    throw new NodeAuthError("missing node authorization header");
-  }
-
-  const parts = headerValue.slice(PREFIX.length).split(".");
-  if (parts.length !== 4) throw new NodeAuthError("malformed node authorization header");
-  const [nodeId, millis, nonce, signature] = parts as [string, string, string, string];
-  if (!nodeId || !millis || !nonce || !signature) {
+  const parts = header.slice(NODE_AUTH_SCHEME.length).split(".");
+  const [nodeId, millis, nonce, signature] = parts;
+  if (parts.length !== 4 || !nodeId || !millis || !nonce || !signature) {
     throw new NodeAuthError("malformed node authorization header");
   }
-  // nodes.id is a Postgres uuid column: an eq() comparison against a
-  // non-uuid string throws a raw driver error rather than returning no
-  // rows, so a malformed-but-4-part node id must be rejected here before
-  // it ever reaches the query.
-  if (!isUuid(nodeId)) {
-    throw new NodeAuthError("malformed node id");
-  }
+  if (!isUuid(nodeId)) throw new NodeAuthError("malformed node id");
 
   const at = Number(millis);
   if (!Number.isFinite(at)) throw new NodeAuthError("malformed timestamp");
@@ -72,64 +49,33 @@ export async function authenticateNode(
     throw new NodeAuthError("timestamp outside the accepted window");
   }
 
-  // The node lookup runs on ownerDb, deliberately: an agent presenting this
-  // header has no session and no org context yet — which org it belongs to
-  // is the *output* of this function, not an input, so it cannot be routed
-  // through withOrg().
   const [row] = await ownerDb
-    .select({ id: nodes.id, orgId: nodes.orgId, publicKey: nodes.publicKey })
-    .from(nodes)
-    .where(eq(nodes.id, nodeId))
-    .limit(1);
+    .select({ orgId: nodes.orgId, publicKey: nodes.publicKey })
+    .from(nodes).where(eq(nodes.id, nodeId)).limit(1);
   if (!row) throw new NodeAuthError("unknown node");
 
-  // Key reconstruction and verification are wrapped narrowly -- just this,
-  // not the DB/Redis calls around it -- because a stored public key that
-  // doesn't round-trip through the fixed SPKI prefix (corrupted row, future
-  // migration bug, manual edit) throws a raw OpenSSL error rather than
-  // returning false. This sits in front of a public, unauthenticated
-  // endpoint, so that must still come out as a clean NodeAuthError, not an
-  // unmapped 500 -- but it is a data problem, not a forged-signature
-  // problem, so it gets its own message and is logged with the node id:
-  // silently reading it as "unauthenticated" would hide a corrupted row
-  // forever.
-  let keyObject: KeyObject;
+  // A stored key that doesn't parse is a data problem, not a forgery: say so
+  // and log it, but still fail as a clean 401 rather than an OpenSSL 500.
+  let key: KeyObject;
   try {
-    keyObject = toKeyObject(row.publicKey);
+    key = toKeyObject(row.publicKey);
   } catch (err) {
-    console.error("[node-auth] stored public key failed to parse", { nodeId: row.id, err });
+    console.error("[node-auth] stored public key failed to parse", { nodeId, err });
     throw new NodeAuthError("stored node key is invalid");
   }
 
-  let ok: boolean;
+  let ok = false;
   try {
-    ok = verify(
-      null,
-      Buffer.from(`${nodeId}.${millis}.${nonce}`),
-      keyObject,
-      Buffer.from(signature, "base64url"),
-    );
+    ok = verify(null, Buffer.from(`${nodeId}.${millis}.${nonce}`), key, Buffer.from(signature, "base64url"));
   } catch {
-    // Distinct from the stored-key case above: the key parsed fine, so a
-    // throw here means the *supplied* signature bytes were unusable, which
-    // is just a more emphatic way for a bad signature to fail than
-    // verify() returning false.
-    throw new NodeAuthError("invalid signature");
+    // Unusable signature bytes; same outcome as a signature that doesn't verify.
   }
   if (!ok) throw new NodeAuthError("invalid signature");
 
-  // One nonce, one use. The replay cache lives in Redis, not an in-process
-  // Map, because the control plane is stateless across replicas by design.
-  // TTL is twice the skew window: that is exactly how long a nonce presented
-  // right at the edge of the window could still fall inside it on retry.
-  const fresh = await redis.set(
-    `nodeauth:${nodeId}:${nonce}`,
-    "1",
-    "PX",
-    env.NODE_AUTH_SKEW_MS * 2,
-    "NX",
-  );
+  // One nonce, one use, remembered in Redis so replicas share it. Twice the
+  // skew window covers any header that could still pass the timestamp check.
+  const fresh = await redis.set(`nodeauth:${nodeId}:${nonce}`, "1", "PX", env.NODE_AUTH_SKEW_MS * 2, "NX");
   if (fresh !== "OK") throw new NodeAuthError("replayed authorization header");
 
-  return { nodeId: row.id, orgId: row.orgId };
+  return { nodeId, orgId: row.orgId };
 }

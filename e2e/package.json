@@ -3,11 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "test": "vitest run" },
+  "scripts": {
+    "test": "vitest run"
+  },
   "devDependencies": {
     "@modelhub/control-plane": "workspace:*",
     "@types/node": "^22.20.2",
-    "dotenv": "^16.4.5",
     "vitest": "^2.1.0"
   }
 }

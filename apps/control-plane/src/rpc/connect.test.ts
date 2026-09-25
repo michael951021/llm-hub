@@ -1,52 +1,30 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
-import { createClient } from "@connectrpc/connect";
+import type { KeyObject } from "node:crypto";
+import type { MessageInitShape } from "@bufbuild/protobuf";
+import { setTimeout as sleep } from "node:timers/promises";
+import { Code, ConnectError, createClient } from "@connectrpc/connect";
 import { createConnectTransport, Http2SessionManager } from "@connectrpc/connect-node";
 import { eq } from "drizzle-orm";
-import { ownerDb, organization, nodes, devices } from "@modelhub/db";
-import { NodeService, DeviceKind, MemoryPressure } from "@modelhub/proto";
-// NodeService.Connect lives on the agent-facing app: it's a bidi stream,
-// which needs HTTP/2 framing that the browser-facing buildApp() no longer
-// offers. See agent-app.ts.
-import { buildAgentApp } from "../agent-app.js";
+import { devices, nodes, ownerDb } from "@modelhub/db";
+import { DeviceKind, MemoryPressure, NodeService, type AgentMessageSchema } from "@modelhub/proto";
 import { sweepOfflineNodes } from "../jobs/offline-sweeper.js";
+import { buildAgentApp } from "../server.js";
+import { createNode, createOrg, listen, nodeAuthHeader } from "../test-helpers.js";
 
 let app: Awaited<ReturnType<typeof buildAgentApp>>;
+// One shared HTTP/2 session, aborted in afterAll: connect-node keeps idle
+// sessions open for reuse, and Fastify's close() waits on open connections.
+let sessionManager: Http2SessionManager;
 let baseUrl: string;
+let orgId: string;
 let nodeId: string;
 let privateKey: KeyObject;
-// A single managed HTTP/2 session shared by every client() call in this
-// file. connect-node's default behavior is to keep an HTTP/2 connection
-// "idle" (not closed) after a stream ends, for reuse (idleConnectionTimeoutMs
-// defaults to 15 minutes). Fastify's http2 server.close() waits for every
-// open connection to end, so without explicitly aborting this session,
-// app.close() in afterAll would hang past the test hook timeout.
-let sessionManager: Http2SessionManager;
-const orgId = `org_${randomUUID().slice(0, 8)}`;
-
-const b64u = (b: Buffer | Uint8Array) => Buffer.from(b).toString("base64url");
-
-function authHeader(): string {
-  const nonce = b64u(Buffer.from(randomUUID()));
-  const payload = `${nodeId}.${Date.now()}.${nonce}`;
-  return `ModelHubNode ${payload}.${b64u(sign(null, Buffer.from(payload), privateKey))}`;
-}
 
 beforeAll(async () => {
-  const pair = generateKeyPairSync("ed25519");
-  privateKey = pair.privateKey;
-  const der = pair.publicKey.export({ format: "der", type: "spki" }) as Buffer;
-
-  await ownerDb.insert(organization).values({ id: orgId, name: "Stream", slug: orgId, createdAt: new Date() });
-  const [row] = await ownerDb.insert(nodes).values({
-    orgId, name: "streamer", publicKey: new Uint8Array(der.subarray(der.length - 32)),
-  }).returning({ id: nodes.id });
-  nodeId = row!.id;
-
+  orgId = await createOrg();
+  ({ nodeId, privateKey } = await createNode(orgId, { name: "streamer" }));
   app = await buildAgentApp();
-  await app.listen({ port: 0, host: "127.0.0.1" });
-  const address = app.server.address();
-  baseUrl = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+  baseUrl = await listen(app);
   sessionManager = new Http2SessionManager(baseUrl);
 });
 
@@ -55,163 +33,105 @@ afterAll(async () => {
   await app.close();
 });
 
+type Message = MessageInitShape<typeof AgentMessageSchema>;
+
 function client() {
-  return createClient(
-    NodeService,
-    createConnectTransport({ baseUrl, httpVersion: "2", sessionManager }),
-  );
+  return createClient(NodeService, createConnectTransport({ baseUrl, httpVersion: "2", sessionManager }));
 }
 
-async function* agentMessages() {
-  yield {
-    payload: {
-      case: "hello" as const,
-      value: {
-        agentVersion: "0.1.0",
-        host: {
-          hostname: "test-box", platform: "linux", arch: "amd64",
-          osVersion: "6.8", agentVersion: "0.1.0",
-          totalMemoryBytes: 68_719_476_736n, cpuCores: 16,
-        },
+const hello: Message = {
+  payload: {
+    case: "hello",
+    value: {
+      agentVersion: "0.1.0",
+      host: {
+        hostname: "test-box", platform: "linux", arch: "amd64", osVersion: "6.8",
+        agentVersion: "0.1.0", totalMemoryBytes: 68_719_476_736n, cpuCores: 16,
       },
     },
-  };
-  yield {
-    payload: {
-      case: "inventory" as const,
-      value: {
-        devices: [{
-          localId: "cuda:0", kind: DeviceKind.CUDA, index: 0,
-          name: "NVIDIA GeForce RTX 4090", totalBytes: 25_769_803_776n,
-          driverVersion: "560.35", computeCapability: "8.9", wiredLimitBytes: 0n,
-        }],
-      },
+  },
+};
+const inventory = (...extra: { localId: string; kind: DeviceKind }[]): Message => ({
+  payload: {
+    case: "inventory",
+    value: {
+      devices: [
+        { localId: "cuda:0", kind: DeviceKind.CUDA, name: "NVIDIA GeForce RTX 4090", totalBytes: 25_769_803_776n },
+        ...extra,
+      ],
     },
-  };
-  yield {
-    payload: {
-      case: "samples" as const,
-      value: {
-        samples: [{
-          localId: "cuda:0", usedBytes: 4_294_967_296n, managedBytes: 0n,
-          utilization: 0.42, temperatureC: 61, powerWatts: 120,
-          pressure: MemoryPressure.NORMAL, sampledAtUnixMs: BigInt(Date.now()),
-        }],
-      },
+  },
+});
+const samples: Message = {
+  payload: {
+    case: "samples",
+    value: {
+      samples: [{
+        localId: "cuda:0", usedBytes: 4_294_967_296n, utilization: 0.42,
+        pressure: MemoryPressure.NORMAL, sampledAtUnixMs: BigInt(Date.now()),
+      }],
     },
-  };
+  },
+};
+
+/** Opens one authenticated stream, sends messages, and waits for the server to apply them. */
+async function stream(messages: Message[], headers: Record<string, string> = { authorization: nodeAuthHeader(nodeId, privateKey) }) {
+  async function* send() { yield* messages; }
+  const responses = client().connect(send(), { headers });
+  const first = await responses[Symbol.asyncIterator]().next();
+  await sleep(300);
+  return first.value;
 }
+
+const deviceRows = () => ownerDb.select().from(devices).where(eq(devices.nodeId, nodeId));
+const nodeRow = async () => (await ownerDb.select().from(nodes).where(eq(nodes.id, nodeId)))[0]!;
 
 describe("NodeService.Connect", () => {
-  it("rejects a stream with no node authorization, and writes nothing", async () => {
-    // Captured before the attempt, not assumed: the assertion below is
-    // about *change* (did authenticateNode's rejection actually prevent
-    // any write?), not just "zero rows happens to be true right now".
-    const devicesBefore = await ownerDb.select().from(devices).where(eq(devices.nodeId, nodeId));
-    // This node is freshly inserted in beforeAll and no prior test in this
-    // file has written a device for it yet, so "zero rows" here is a
-    // meaningful precondition, not a coincidence of this being the first
-    // test to run — asserted explicitly so a reordering would fail loudly
-    // instead of silently making the post-attempt check ambiguous.
-    expect(devicesBefore).toHaveLength(0);
-    const [nodeBefore] = await ownerDb.select().from(nodes).where(eq(nodes.id, nodeId));
+  it("rejects an unauthenticated stream before applying anything it sent", async () => {
+    const before = await nodeRow();
+    const err = await stream([hello, inventory(), samples], {}).catch((e: unknown) => e);
 
-    await expect(async () => {
-      for await (const _ of client().connect(agentMessages())) break;
-    }).rejects.toThrow();
-
-    // The full Hello -> InventoryReport -> SampleBatch sequence was sent
-    // on the wire above; if authenticateNode() were not genuinely the
-    // first thing the handler does, some prefix of it could have been
-    // processed before the rejection. Prove it wasn't: no device row
-    // exists, and the node's liveness columns are byte-for-byte what they
-    // were before the attempt.
-    const devicesAfter = await ownerDb.select().from(devices).where(eq(devices.nodeId, nodeId));
-    expect(devicesAfter).toHaveLength(0);
-
-    const [nodeAfter] = await ownerDb.select().from(nodes).where(eq(nodes.id, nodeId));
-    expect(nodeAfter!.status).toBe(nodeBefore!.status);
-    expect(nodeAfter!.lastSeenAt).toEqual(nodeBefore!.lastSeenAt);
+    expect(ConnectError.from(err).code).toBe(Code.Unauthenticated);
+    expect(await deviceRows()).toHaveLength(0);
+    const after = await nodeRow();
+    expect(after.status).toBe(before.status);
+    expect(after.lastSeenAt).toEqual(before.lastSeenAt);
   });
 
   it("acknowledges hello, stores inventory, and records samples", async () => {
-    const stream = client().connect(agentMessages(), {
-      headers: { authorization: authHeader() },
-    });
+    const ack = await stream([hello, inventory(), samples]);
+    expect(ack?.payload).toMatchObject({ case: "helloAck", value: { nodeId } });
 
-    const first = await stream[Symbol.asyncIterator]().next();
-    expect(first.value?.payload.case).toBe("helloAck");
-    expect(first.value?.payload.value.nodeId).toBe(nodeId);
-
-    // Let the remaining messages drain.
-    await new Promise((r) => setTimeout(r, 300));
-
-    const [device] = await ownerDb.select().from(devices).where(eq(devices.nodeId, nodeId));
-    expect(device!.localId).toBe("cuda:0");
-    expect(device!.kind).toBe("cuda");
-    expect(device!.totalBytes).toBe(25_769_803_776n);
-    expect(device!.lastUsedBytes).toBe(4_294_967_296n);
-    expect(device!.lastUtilization).toBeCloseTo(0.42, 2);
-
-    const [node] = await ownerDb.select().from(nodes).where(eq(nodes.id, nodeId));
-    expect(node!.status).toBe("online");
-    expect(node!.lastSeenAt).not.toBeNull();
+    const [device] = await deviceRows();
+    expect(device).toMatchObject({ localId: "cuda:0", kind: "cuda", totalBytes: 25_769_803_776n, lastUsedBytes: 4_294_967_296n });
+    expect(device!.lastUtilization).toBeCloseTo(0.42);
+    expect(await nodeRow()).toMatchObject({ status: "online", hostname: "test-box", cpuCores: 16 });
   });
 
-  it("removes devices the node stops reporting", async () => {
-    await ownerDb.insert(devices).values({
-      orgId, nodeId, localId: "cuda:9", kind: "cuda", name: "ghost", totalBytes: 1n,
-    });
-    const stream = client().connect(agentMessages(), {
-      headers: { authorization: authHeader() },
-    });
-    for await (const _ of stream) break;
-    await new Promise((r) => setTimeout(r, 300));
-
-    const rows = await ownerDb.select().from(devices).where(eq(devices.nodeId, nodeId));
-    expect(rows.map((r) => r.localId)).toEqual(["cuda:0"]);
+  it("removes devices the node stops reporting, and drops unknown kinds", async () => {
+    await ownerDb.insert(devices).values({ orgId, nodeId, localId: "cuda:9", kind: "cuda", name: "ghost" });
+    await stream([inventory({ localId: "npu:0", kind: DeviceKind.UNSPECIFIED })]);
+    expect((await deviceRows()).map((d) => d.localId)).toEqual(["cuda:0"]);
   });
 
-  it("refreshes lastSeenAt from an empty sample batch alone", async () => {
-    // recordSamples deliberately does not early-return on an empty
-    // `samples` array (a deviation from the task brief's sketch): an
-    // agent that is connected and sends a SampleBatch with no devices in
-    // it is still alive, so that alone should count as a heartbeat. Prove
-    // it in isolation — no hello, no inventory in this stream — so this
-    // doesn't pass merely because hello's markNodeOnline() also touches
-    // lastSeenAt.
-    await ownerDb.update(nodes)
-      .set({ status: "offline", lastSeenAt: new Date(Date.now() - 60_000) })
+  it("counts an empty sample batch as a heartbeat", async () => {
+    await ownerDb.update(nodes).set({ status: "offline", lastSeenAt: new Date(Date.now() - 60_000) })
       .where(eq(nodes.id, nodeId));
+    await stream([{ payload: { case: "samples", value: { samples: [] } } }]);
 
-    async function* emptyBatchOnly() {
-      yield { payload: { case: "samples" as const, value: { samples: [] } } };
-    }
-
-    const stream = client().connect(emptyBatchOnly(), {
-      headers: { authorization: authHeader() },
-    });
-    for await (const _ of stream) break;
-    await new Promise((r) => setTimeout(r, 300));
-
-    const [node] = await ownerDb.select().from(nodes).where(eq(nodes.id, nodeId));
-    expect(node!.status).toBe("online");
-    expect(node!.lastSeenAt!.getTime()).toBeGreaterThan(Date.now() - 5_000);
+    const node = await nodeRow();
+    expect(node.status).toBe("online");
+    expect(node.lastSeenAt!.getTime()).toBeGreaterThan(Date.now() - 5_000);
   });
 
   it("marks a silent node degraded, then offline", async () => {
-    await ownerDb.update(nodes)
-      .set({ status: "online", lastSeenAt: new Date(Date.now() - 20_000) })
+    await ownerDb.update(nodes).set({ status: "online", lastSeenAt: new Date(Date.now() - 20_000) })
       .where(eq(nodes.id, nodeId));
     await sweepOfflineNodes();
-    let [row] = await ownerDb.select().from(nodes).where(eq(nodes.id, nodeId));
-    expect(row!.status).toBe("degraded");
+    expect((await nodeRow()).status).toBe("degraded");
 
-    await ownerDb.update(nodes)
-      .set({ lastSeenAt: new Date(Date.now() - 40_000) })
-      .where(eq(nodes.id, nodeId));
+    await ownerDb.update(nodes).set({ lastSeenAt: new Date(Date.now() - 40_000) }).where(eq(nodes.id, nodeId));
     await sweepOfflineNodes();
-    [row] = await ownerDb.select().from(nodes).where(eq(nodes.id, nodeId));
-    expect(row!.status).toBe("offline");
+    expect((await nodeRow()).status).toBe("offline");
   });
 });

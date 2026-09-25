@@ -4,14 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"connectrpc.com/connect"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	modelhubv1 "github.com/modelhub/agent/gen/modelhub/v1"
 	"github.com/modelhub/agent/gen/modelhub/v1/modelhubv1connect"
 	"github.com/modelhub/agent/internal/inventory"
@@ -35,21 +30,6 @@ func (s *stubNodeService) Enroll(
 		OrgId:   "org_abc",
 		OrgName: "Test Fleet",
 	}), nil
-}
-
-// newStubServer starts an httptest server that speaks h2c (cleartext
-// HTTP/2). The production client (see client.go) forces HTTP/2 with prior
-// knowledge over a plain http:// URL, so a stub server that only speaks
-// HTTP/1.1 (a bare httptest.NewServer) would fail to connect. Wrapping the
-// mux in h2c.NewHandler lets the standard net/http server recognize the
-// HTTP/2 connection preface and upgrade in place.
-func newStubServer(t *testing.T, stub *stubNodeService) string {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.Handle(modelhubv1connect.NewNodeServiceHandler(stub))
-	server := httptest.NewServer(h2c.NewHandler(mux, &http2.Server{}))
-	t.Cleanup(server.Close)
-	return server.URL
 }
 
 func TestEnrollSendsKeyAndHostFacts(t *testing.T) {

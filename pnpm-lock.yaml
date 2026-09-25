@@ -212,15 +212,15 @@ importers:
         specifier: ^3.23.8
         version: 3.25.76
     devDependencies:
+      '@bufbuild/protobuf':
+        specifier: ^2.2.0
+        version: 2.15.0
       '@connectrpc/connect-node':
         specifier: ^2.0.0
         version: 2.2.0(@bufbuild/protobuf@2.15.0)(@connectrpc/connect@2.2.0(@bufbuild/protobuf@2.15.0))
       '@types/node':
         specifier: ^22.20.2
         version: 22.20.2
-      dotenv:
-        specifier: ^16.4.5
-        version: 16.6.1
       tsx:
         specifier: ^4.19.0
         version: 4.23.13
@@ -258,6 +258,9 @@ importers:
         specifier: ^18.3.1
         version: 18.3.1(react@18.3.1)
     devDependencies:
+      '@bufbuild/protobuf':
+        specifier: ^2.2.0
+        version: 2.15.0
       '@testing-library/jest-dom':
         specifier: ^6.6.0
         version: 6.10.0(@testing-library/dom@10.4.2)
@@ -303,9 +306,6 @@ importers:
       '@types/node':
         specifier: ^22.20.2
         version: 22.20.2
-      dotenv:
-        specifier: ^16.4.5
-        version: 16.6.1
       vitest:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.20.2)(jsdom@25.0.1)(lightningcss@1.33.0)
@@ -331,9 +331,6 @@ importers:
       '@types/node':
         specifier: ^22.20.2
         version: 22.20.2
-      dotenv:
-        specifier: ^16.4.5
-        version: 16.6.1
       drizzle-kit:
         specifier: ^0.28.0
         version: 0.28.1
@@ -356,9 +353,6 @@ importers:
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
-      vitest:
-        specifier: ^2.1.0
-        version: 2.1.9(@types/node@22.20.2)(jsdom@25.0.1)(lightningcss@1.33.0)
 
 packages:
 
@@ -1860,10 +1854,6 @@ packages:
 
   dom-accessibility-api@0.6.3:
     resolution: {integrity: sha512-7ZgogeTnjuHbo+ct10G9Ffp0mif17idi0IyWNVA/wcwcm7NPOD/WEHVP3n7n3MhXqxoIYm8d6MuZohYWIZ4T3w==}
-
-  dotenv@16.6.1:
-    resolution: {integrity: sha512-uBq4egWHTcTt33a72vpSG0z3HnPuIl6NqYcTrKEg2azoEyl2hpW0zqlxysq2pK9HlDIHyHyakeYaYnSAwd8bow==}
-    engines: {node: '>=12'}
 
   drizzle-kit@0.28.1:
     resolution: {integrity: sha512-JimOV+ystXTWMgZkLHYHf2w3oS28hxiH1FR0dkmJLc7GHzdGJoJAQtQS5DRppnabsRZwE2U1F6CuezVBgmsBBQ==}
@@ -3954,8 +3944,6 @@ snapshots:
   dom-accessibility-api@0.5.16: {}
 
   dom-accessibility-api@0.6.3: {}
-
-  dotenv@16.6.1: {}
 
   drizzle-kit@0.28.1:
     dependencies:

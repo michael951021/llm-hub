@@ -1,68 +1,56 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { createHash, randomUUID } from "node:crypto";
-import { ownerDb, organization, pairingCodes } from "@modelhub/db";
+import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { mintPairingCode, redeemPairingCode, PairingCodeError, hashCode, normalize } from "./pairing.js";
+import { ownerDb, pairingCodes } from "@modelhub/db";
+import { createOrg } from "../test-helpers.js";
+import { hashCode, mintPairingCode, normalize, PairingCodeError, redeemPairingCode } from "./pairing.js";
 
-const orgId = `org_${randomUUID().slice(0, 8)}`;
-const userId = `user_${randomUUID().slice(0, 8)}`;
+let orgId: string;
+const mint = (name = "n") => mintPairingCode(orgId, "user_1", name);
 
-beforeAll(async () => {
-  // Task 6 replaced organization's schema with the one Better Auth generates;
-  // createdAt has no DB-side default there, so a direct insert must supply it
-  // (see packages/db/src/rls.test.ts for the same note).
-  await ownerDb.insert(organization).values({ id: orgId, name: "T", slug: orgId, createdAt: new Date() });
-});
+beforeAll(async () => { orgId = await createOrg(); });
 
 describe("pairing codes", () => {
-  it("mints a human-typeable code", async () => {
-    const { code, expiresAt } = await mintPairingCode(orgId, userId, "mac-studio");
-    expect(code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+  it("mints a human-typeable code that expires in the future", async () => {
+    const { code, expiresAt } = await mint();
+    expect(code).toMatch(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
     expect(expiresAt.getTime()).toBeGreaterThan(Date.now());
   });
 
-  it("never stores the code itself", async () => {
-    const { code } = await mintPairingCode(orgId, userId, "n1");
-    const rows = await ownerDb.select().from(pairingCodes).where(eq(pairingCodes.orgId, orgId));
-    for (const row of rows) expect(row.codeHash).not.toContain(code);
+  it("stores a peppered HMAC, not the code or its bare SHA-256", async () => {
+    const { code } = await mint();
+    const [row] = await ownerDb.select().from(pairingCodes).where(eq(pairingCodes.codeHash, hashCode(code)));
+    expect(row).toBeDefined();
+    expect(row!.codeHash).not.toBe(createHash("sha256").update(normalize(code)).digest("hex"));
   });
 
-  it("redeems a valid code once and returns its org", async () => {
-    const { code } = await mintPairingCode(orgId, userId, "four-ninety");
-    const result = await redeemPairingCode(code);
-    expect(result.orgId).toBe(orgId);
-    expect(result.nodeName).toBe("four-ninety");
+  it("redeems once, returning the org and the name it was minted with", async () => {
+    const { code } = await mint("four-ninety");
+    expect(await redeemPairingCode(code)).toEqual({ orgId, nodeName: "four-ninety" });
+    await expect(redeemPairingCode(code)).rejects.toThrow(/already used/);
   });
 
-  it("refuses a second redemption of the same code", async () => {
-    const { code } = await mintPairingCode(orgId, userId, "n2");
-    await redeemPairingCode(code);
-    await expect(redeemPairingCode(code)).rejects.toThrow(PairingCodeError);
+  it("has exactly one winner when two redemptions race", async () => {
+    const { code } = await mint();
+    const results = await Promise.allSettled([redeemPairingCode(code), redeemPairingCode(code)]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
   });
 
   it("refuses an unknown code", async () => {
     await expect(redeemPairingCode("ZZZZ-ZZZZ")).rejects.toThrow(PairingCodeError);
   });
 
-  it("refuses an expired code", async () => {
-    const { code } = await mintPairingCode(orgId, userId, "n3");
-    const hash = (await import("./pairing.js")).hashCode(code);
+  it("refuses an expired code, and keeps saying so on retry", async () => {
+    const { code } = await mint();
     await ownerDb.update(pairingCodes)
       .set({ expiresAt: new Date(Date.now() - 1000) })
-      .where(eq(pairingCodes.codeHash, hash));
-    await expect(redeemPairingCode(code)).rejects.toThrow(/expired/i);
+      .where(eq(pairingCodes.codeHash, hashCode(code)));
+    await expect(redeemPairingCode(code)).rejects.toThrow(/expired/);
+    await expect(redeemPairingCode(code)).rejects.toThrow(/expired/);
   });
 
   it("is case-insensitive and tolerates a missing dash", async () => {
-    const { code } = await mintPairingCode(orgId, userId, "n4");
-    const mangled = code.toLowerCase().replace("-", "");
-    const result = await redeemPairingCode(mangled);
-    expect(result.orgId).toBe(orgId);
-  });
-
-  it("hashes with a keyed pepper, not a bare SHA-256", async () => {
-    const { code } = await mintPairingCode(orgId, userId, "n5");
-    const plainSha256 = createHash("sha256").update(normalize(code)).digest("hex");
-    expect(hashCode(code)).not.toBe(plainSha256);
+    const { code } = await mint();
+    expect((await redeemPairingCode(code.toLowerCase().replace("-", ""))).orgId).toBe(orgId);
   });
 });

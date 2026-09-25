@@ -7,7 +7,6 @@
   "scripts": {
     "generate": "cd ../../proto && pnpm exec buf generate",
     "lint": "cd ../../proto && pnpm exec buf lint",
-    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -15,7 +14,6 @@
     "@connectrpc/connect": "^2.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "typescript": "^5.6.0"
   }
 }
